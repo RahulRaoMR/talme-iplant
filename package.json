@@ -1,0 +1,22 @@
+{
+  "name": "talme-enterprise-auth",
+  "version": "1.0.0",
+  "description": "Self-contained enterprise authentication and RBAC system for Talme.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
+    "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke-test.js"
+  },
+  "keywords": [
+    "auth",
+    "rbac",
+    "hrms",
+    "ats"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  }
+}

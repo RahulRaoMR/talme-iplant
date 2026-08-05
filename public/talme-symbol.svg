@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 285" role="img" aria-labelledby="talmeSymbolTitle">
+  <title id="talmeSymbolTitle">Talme logo mark</title>
+  <g fill="none" stroke="#243f8f" stroke-width="11" stroke-linejoin="miter" stroke-linecap="square">
+    <path d="M113 26h70v282h-70V187h35V63h-35z"/>
+    <path d="M113 63H84v82H26V73h36v45h22V26h29z"/>
+    <path d="M183 63h33v55h22V73h36v72h-58V95h-33z"/>
+    <path d="M183 239h-42v37h42z"/>
+  </g>
+</svg>
