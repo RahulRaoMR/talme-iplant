@@ -10,6 +10,7 @@ const {
   refreshTokenTtlSeconds,
   rememberMeTtlSeconds,
   sessionTimeoutSeconds,
+  cvUploadDir,
   employeeInviteCode
 } = require("./config");
 const {
@@ -1132,10 +1133,9 @@ function saveCandidateCv(file) {
     throw error;
   }
 
-  const uploadDir = path.join(__dirname, "..", "data", "candidate-cvs");
   const storedName = `${Date.now()}-${randomToken(8)}${extension}`;
-  fs.mkdirSync(uploadDir, { recursive: true });
-  fs.writeFileSync(path.join(uploadDir, storedName), file.buffer);
+  fs.mkdirSync(cvUploadDir, { recursive: true });
+  fs.writeFileSync(path.join(cvUploadDir, storedName), file.buffer);
   return {
     cvFileName: path.basename(file.filename),
     cvStoredName: storedName
@@ -1144,15 +1144,14 @@ function saveCandidateCv(file) {
 
 function removeStoredCv(storedName) {
   if (!storedName) return;
-  const filePath = path.join(__dirname, "..", "data", "candidate-cvs", storedName);
+  const filePath = path.join(cvUploadDir, storedName);
   if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 }
 
 function candidateCvPath(storedName) {
-  const uploadDir = path.join(__dirname, "..", "data", "candidate-cvs");
-  const filePath = path.join(uploadDir, path.basename(storedName || ""));
+  const filePath = path.join(cvUploadDir, path.basename(storedName || ""));
   const normalized = path.normalize(filePath);
-  if (!normalized.startsWith(uploadDir)) return null;
+  if (!normalized.startsWith(path.normalize(cvUploadDir))) return null;
   return normalized;
 }
 
@@ -2160,7 +2159,7 @@ const routes = {
   "GET /api/candidate/applications": candidateApplications
 };
 
-const server = http.createServer(async (req, res) => {
+async function requestHandler(req, res) {
   applySecurityHeaders(res);
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const routeKey = `${req.method} ${url.pathname}`;
@@ -2186,7 +2185,9 @@ const server = http.createServer(async (req, res) => {
     console.error(error);
     sendError(res, statusCode, statusCode === 500 ? "Internal server error" : error.message);
   }
-});
+}
+
+const server = http.createServer(requestHandler);
 
 server.on("error", error => {
   if (error.code === "EADDRINUSE") {
@@ -2196,6 +2197,13 @@ server.on("error", error => {
   throw error;
 });
 
-server.listen(port, () => {
-  console.log(`Talme auth system running at http://localhost:${port}`);
-});
+if (require.main === module) {
+  server.listen(port, () => {
+    console.log(`Talme auth system running at http://localhost:${port}`);
+  });
+}
+
+module.exports = {
+  requestHandler,
+  server
+};

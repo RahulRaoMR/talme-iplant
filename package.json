@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Self-contained enterprise authentication and RBAC system for Talme.",
   "main": "src/server.js",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
