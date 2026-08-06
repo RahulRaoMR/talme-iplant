@@ -473,7 +473,7 @@ function loginForm(message) {
       <div class="field">
         <label>Email</label>
         <input name="email" type="email" placeholder="${suggestedEmail}" autocomplete="off" required>
-        <small class="field-hint">Enter manually: ${suggestedEmail}</small>
+        <small class="field-hint">Enter the email address manually.</small>
       </div>
       <div class="field">
         <label>Password</label>
@@ -694,7 +694,7 @@ function navigate(path) {
 async function renderDashboard(pathname) {
   const root = document.querySelector("#app");
   if (!state.accessToken || !state.user) {
-    return renderForbidden("Authentication required");
+    return renderLandingPage();
   }
 
   const title = dashboardTitles[pathname] || "Dashboard";
@@ -1769,7 +1769,7 @@ function navigateHrEmployeeProfile(employee, employeeId = employeeRecordId(emplo
 async function renderHrEmployeeRoute(pathname) {
   const root = document.querySelector("#app");
   if (!state.accessToken || !state.user) {
-    return renderForbidden("Authentication required");
+    return renderLandingPage();
   }
   if (!state.user?.permissions?.includes("employees.manage") && !state.user?.permissions?.includes("*")) {
     return renderForbidden("403 Forbidden");
@@ -2544,6 +2544,14 @@ function renderForbidden(message) {
       </section>
     </main>
   `;
+  bindLanding();
+}
+
+function renderLandingPage() {
+  if (window.location.pathname !== "/") {
+    history.replaceState({}, "", "/");
+  }
+  document.querySelector("#app").innerHTML = landing();
   bindLanding();
 }
 
