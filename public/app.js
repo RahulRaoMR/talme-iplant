@@ -161,6 +161,7 @@ async function api(path, options = {}) {
   if (state.csrfToken) headers["X-CSRF-Token"] = state.csrfToken;
   let response = await fetch(path, {
     ...options,
+    cache: "no-store",
     headers,
     body
   });
@@ -173,6 +174,7 @@ async function api(path, options = {}) {
     if (state.csrfToken) retryHeaders["X-CSRF-Token"] = state.csrfToken;
     response = await fetch(path, {
       ...options,
+      cache: "no-store",
       headers: retryHeaders,
       body
     });
@@ -188,6 +190,7 @@ async function apiUpload(path, formData, options = {}) {
   if (state.csrfToken) headers["X-CSRF-Token"] = state.csrfToken;
   let response = await fetch(path, {
     method: options.method || "POST",
+    cache: "no-store",
     headers,
     body: formData
   });
@@ -197,6 +200,7 @@ async function apiUpload(path, formData, options = {}) {
     if (state.csrfToken) retryHeaders["X-CSRF-Token"] = state.csrfToken;
     response = await fetch(path, {
       method: options.method || "POST",
+      cache: "no-store",
       headers: retryHeaders,
       body: formData
     });
