@@ -3,11 +3,15 @@
   "version": 2,
   "rewrites": [
     {
-      "source": "/api/:path*",
-      "destination": "/api?path=:path*"
+      "source": "/api",
+      "destination": "/api/index"
     },
     {
-      "source": "/(.*)",
+      "source": "/api/:path*",
+      "destination": "/api/index?path=:path*"
+    },
+    {
+      "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
   ]

@@ -354,6 +354,10 @@ function createAuthResponse(req, res, user, rememberMe = false, action = "Login"
 }
 
 async function login(req, res) {
+  console.log("[iplant-api-trace] login route executing", {
+    method: req.method,
+    url: req.url
+  });
   const body = await parseJsonBody(req);
   const email = String(body.email || "").trim();
   const password = String(body.password || "");
@@ -2163,6 +2167,10 @@ async function requestHandler(req, res) {
   applySecurityHeaders(res);
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const routeKey = `${req.method} ${url.pathname}`;
+  console.log("[iplant-api-trace] requestHandler received request", {
+    routeKey,
+    url: req.url
+  });
   if (!enforceRateLimit(req, res)) return;
   try {
     if (routes[routeKey]) return await routes[routeKey](req, res);
