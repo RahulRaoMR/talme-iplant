@@ -321,6 +321,7 @@ function validateCsrf(req, context) {
 function setRefreshCookie(res, refreshToken, maxAge) {
   res.setHeader("Set-Cookie", cookie("talme_refresh", refreshToken, {
     httpOnly: true,
+    secure: Boolean(process.env.VERCEL),
     sameSite: "Strict",
     maxAge
   }));
@@ -329,6 +330,7 @@ function setRefreshCookie(res, refreshToken, maxAge) {
 function clearRefreshCookie(res) {
   res.setHeader("Set-Cookie", cookie("talme_refresh", "", {
     httpOnly: true,
+    secure: Boolean(process.env.VERCEL),
     sameSite: "Strict",
     maxAge: 0
   }));

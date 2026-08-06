@@ -122,6 +122,7 @@ function sendTabCloseLogout() {
   }
   fetch("/api/auth/tab-close", {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: payload,
     keepalive: true
@@ -146,9 +147,8 @@ function bindTabCloseLogout() {
     }
   }, true);
 
-  window.addEventListener("pagehide", event => {
-    if (!event.persisted) sendTabCloseLogout();
-  });
+  // Keep browser refreshes, tab restores, and long-running uploads from revoking
+  // the session unexpectedly. Explicit Logout still closes the session.
 }
 
 async function api(path, options = {}) {
@@ -162,6 +162,7 @@ async function api(path, options = {}) {
   let response = await fetch(path, {
     ...options,
     cache: "no-store",
+    credentials: "same-origin",
     headers,
     body
   });
@@ -175,6 +176,7 @@ async function api(path, options = {}) {
     response = await fetch(path, {
       ...options,
       cache: "no-store",
+      credentials: "same-origin",
       headers: retryHeaders,
       body
     });
@@ -191,6 +193,7 @@ async function apiUpload(path, formData, options = {}) {
   let response = await fetch(path, {
     method: options.method || "POST",
     cache: "no-store",
+    credentials: "same-origin",
     headers,
     body: formData
   });
@@ -201,6 +204,7 @@ async function apiUpload(path, formData, options = {}) {
     response = await fetch(path, {
       method: options.method || "POST",
       cache: "no-store",
+      credentials: "same-origin",
       headers: retryHeaders,
       body: formData
     });
@@ -212,7 +216,11 @@ async function apiUpload(path, formData, options = {}) {
 
 async function refreshSession() {
   try {
-    const response = await fetch("/api/auth/refresh", { method: "POST" });
+    const response = await fetch("/api/auth/refresh", {
+      method: "POST",
+      cache: "no-store",
+      credentials: "same-origin"
+    });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || !payload.accessToken) return false;
     setTokens(payload);
