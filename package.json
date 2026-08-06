@@ -2,11 +2,12 @@
   "name": "talme-enterprise-auth",
   "version": "1.0.0",
   "description": "Self-contained enterprise authentication and RBAC system for Talme.",
-  "main": "src/server.js",
+  "type": "commonjs",
   "engines": {
     "node": "24.x"
   },
   "scripts": {
+    "build": "node --check src/server.js && node --check api/index.js && node --check scripts/smoke-test.js",
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
     "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke-test.js"

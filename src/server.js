@@ -2203,7 +2203,6 @@ if (require.main === module) {
   });
 }
 
-module.exports = {
-  requestHandler,
-  server
-};
+module.exports = server;
+module.exports.requestHandler = requestHandler;
+module.exports.server = server;
