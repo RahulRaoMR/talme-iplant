@@ -147,10 +147,19 @@ function permissionsForUser(userId) {
   return permissions;
 }
 
-function sanitizeUser(user) {
+function canUsePreferredRole(roleSlugs, permissions, preferredRole) {
+  if (!preferredRole) return false;
+  if (roleSlugs.includes(preferredRole)) return true;
+  const redirectTo = ROLE_REDIRECTS[preferredRole];
+  const permission = DASHBOARD_PERMISSIONS[redirectTo];
+  return Boolean(permission && permissions.includes(permission));
+}
+
+function sanitizeUser(user, preferredRole = null) {
   const roles = rolesForUser(user.id);
   const permissions = permissionsForUser(user.id);
-  const primaryRole = roles[0]?.slug || "guest";
+  const roleSlugs = roles.map(role => role.slug);
+  const primaryRole = canUsePreferredRole(roleSlugs, permissions, preferredRole) ? preferredRole : (roles[0]?.slug || "guest");
   return {
     id: user.id,
     name: user.name,
@@ -345,11 +354,12 @@ function clearRefreshCookie(res) {
 
 function primaryRoleForRequestedLogin(user, requestedRole) {
   const roles = rolesForUser(user.id).map(role => role.slug);
-  if (requestedRole && roles.includes(requestedRole)) return requestedRole;
+  const permissions = permissionsForUser(user.id);
+  if (canUsePreferredRole(roles, permissions, requestedRole)) return requestedRole;
   return roles[0] || null;
 }
 
-function createAuthResponse(req, res, user, rememberMe = false, action = "Login") {
+function createAuthResponse(req, res, user, rememberMe = false, action = "Login", preferredRole = null) {
   const session = createSession(req, user, rememberMe);
   setRefreshCookie(res, session.refreshToken, rememberMe ? rememberMeTtlSeconds : refreshTokenTtlSeconds);
   logLogin(req, user, true, action);
@@ -357,7 +367,7 @@ function createAuthResponse(req, res, user, rememberMe = false, action = "Login"
   sendJson(res, 200, {
     accessToken: session.accessToken,
     csrfToken: session.csrfToken,
-    user: sanitizeUser(user),
+    user: sanitizeUser(user, preferredRole),
     expiresAt: session.expiresAt
   });
 }
@@ -385,7 +395,7 @@ async function login(req, res) {
     logLogin(req, user, false, "2FA Required", "Missing or invalid 2FA code", email);
     return sendJson(res, 202, { requires2fa: true, message: "Two-factor authentication required. Demo code: 000000" });
   }
-  createAuthResponse(req, res, user, Boolean(body.rememberMe));
+  createAuthResponse(req, res, user, Boolean(body.rememberMe), "Login", loginRole);
 }
 
 async function socialLogin(req, res) {
