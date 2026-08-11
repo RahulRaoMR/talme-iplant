@@ -108,6 +108,21 @@ function clearStoredAuth() {
   state.user = null;
 }
 
+function logoutWhenLoginPageOpens() {
+  const accessToken = state.accessToken;
+  if (!accessToken && !state.user) return;
+  clearStoredAuth();
+  state.unloadLogoutSent = true;
+  fetch("/api/auth/tab-close", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accessToken }),
+    keepalive: true
+  }).catch(() => {});
+}
+
 function sendTabCloseLogout() {
   if (!state.accessToken || state.unloadLogoutSent || state.skipUnloadLogout) return;
   state.unloadLogoutSent = true;
@@ -298,6 +313,7 @@ function render() {
   const pathname = window.location.pathname;
   if (pathname.startsWith("/hr/employees/")) return renderHrEmployeeRoute(pathname);
   if (pathname.includes("/dashboard")) return renderDashboard(pathname);
+  if (pathname === "/") logoutWhenLoginPageOpens();
   document.querySelector("#app").innerHTML = landing();
   bindLanding();
 }
