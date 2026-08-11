@@ -65,6 +65,7 @@ const demoCandidateContact = {
 };
 
 let securityMonitorTimer = null;
+let importCommitProgressTimer = null;
 
 document.body.classList.toggle("dark", state.theme === "dark");
 
@@ -1424,6 +1425,15 @@ function candidateImportModal() {
         <p class="notice" data-import-status></p>
         <div class="import-summary" data-import-summary></div>
         <div class="import-preview" data-import-preview></div>
+        <div class="import-progress" data-import-progress hidden>
+          <div class="import-progress-head">
+            <strong>Submitting to database</strong>
+            <span data-import-progress-label>0% completed</span>
+          </div>
+          <div class="import-progress-track" aria-hidden="true">
+            <span data-import-progress-bar style="width: 0%"></span>
+          </div>
+        </div>
         <div class="import-footer">
           <button class="btn" data-import-close>Cancel</button>
           <button class="btn primary" data-commit-import disabled>Submit to database</button>
@@ -1490,6 +1500,53 @@ function renderImportPreview(payload) {
   `;
 }
 
+function setImportProgress(percent, label = null) {
+  const progress = document.querySelector("[data-import-progress]");
+  const bar = document.querySelector("[data-import-progress-bar]");
+  const text = document.querySelector("[data-import-progress-label]");
+  if (!progress || !bar || !text) return;
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  progress.hidden = false;
+  bar.style.width = `${value}%`;
+  text.textContent = label || `${value}% completed`;
+}
+
+function stopImportProgress() {
+  if (importCommitProgressTimer) {
+    clearInterval(importCommitProgressTimer);
+    importCommitProgressTimer = null;
+  }
+}
+
+function resetImportProgress() {
+  stopImportProgress();
+  const progress = document.querySelector("[data-import-progress]");
+  const bar = document.querySelector("[data-import-progress-bar]");
+  const text = document.querySelector("[data-import-progress-label]");
+  if (bar) bar.style.width = "0%";
+  if (text) text.textContent = "0% completed";
+  if (progress) progress.hidden = true;
+}
+
+function startImportProgress(submit) {
+  stopImportProgress();
+  let percent = 0;
+  setImportProgress(percent);
+  if (submit) submit.textContent = "Submitting 0%";
+  importCommitProgressTimer = setInterval(() => {
+    percent = Math.min(95, percent + Math.max(1, Math.ceil((96 - percent) * 0.08)));
+    setImportProgress(percent);
+    if (submit) submit.textContent = `Submitting ${percent}%`;
+    if (percent >= 95) stopImportProgress();
+  }, 350);
+}
+
+async function finishImportProgress(submit) {
+  stopImportProgress();
+  setImportProgress(100, "100% completed");
+  if (submit) submit.textContent = "100% completed";
+  await new Promise(resolve => setTimeout(resolve, 550));
+}
 function bindCandidateImport() {
   document.querySelectorAll("[data-import-close]").forEach(button => {
     button.addEventListener("click", () => document.querySelector(".import-backdrop")?.remove());
@@ -1508,6 +1565,7 @@ function bindCandidateImport() {
     formData.append("file", file);
     status.textContent = "Reading file and preparing preview...";
     status.className = "notice";
+    resetImportProgress();
     document.querySelector("[data-commit-import]").disabled = true;
 
     try {
@@ -1527,15 +1585,17 @@ function bindCandidateImport() {
     const status = document.querySelector("[data-import-status]");
     const submit = document.querySelector("[data-commit-import]");
     if (!state.candidateImportId) return;
-    status.textContent = "Saving employees into database...";
+    status.textContent = "Submitting employees into database...";
     status.className = "notice";
     submit.disabled = true;
+    startImportProgress(submit);
 
     try {
       const payload = await api("/api/import/employees/commit", {
         method: "POST",
         body: { importId: state.candidateImportId }
       });
+      await finishImportProgress(submit);
       const summary = payload.summary;
       state.hrImportConfirmation = `${summary.created} created, ${summary.updated} updated, ${summary.failed} failed`;
       state.candidateImportId = "";
@@ -1546,9 +1606,11 @@ function bindCandidateImport() {
       renderHrDashboard(document.querySelector("#app"));
       document.querySelector(".employee-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (error) {
+      stopImportProgress();
       status.textContent = error.message;
       status.className = "notice error";
       submit.disabled = false;
+      submit.textContent = "Submit to database";
     }
   });
 }
