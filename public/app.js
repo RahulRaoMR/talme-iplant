@@ -14,7 +14,8 @@ const state = {
   hrImportConfirmation: "",
   skipUnloadLogout: false,
   unloadLogoutSent: false,
-  passwordResetEmail: ""
+  passwordResetEmail: "",
+  passwordResetOtp: ""
 };
 
 localStorage.removeItem("talme_access");
@@ -486,12 +487,14 @@ function authModal(message = "") {
 
 function authTitle() {
   if (state.authMode === "register") return "Create account";
+  if (state.authMode === "otp") return "Verify OTP";
   if (state.authMode === "reset") return "Reset password";
   return "Welcome back";
 }
 
 function authContent(message = "") {
   if (state.authMode === "register") return registerForm(message);
+  if (state.authMode === "otp") return forgotOtpForm(message);
   if (state.authMode === "reset") return resetPasswordForm(message);
   return loginForm(message);
 }
@@ -563,6 +566,24 @@ function registerForm(message) {
   `;
 }
 
+function forgotOtpForm(message) {
+  return h`
+    <form class="form" data-forgot-otp-form>
+      <div class="field">
+        <label>OTP</label>
+        <input name="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="Enter 6-digit OTP" required>
+        <small class="field-hint">OTP sent to ${escapeHtml(state.passwordResetEmail)}. It expires in 10 minutes.</small>
+      </div>
+      <button class="btn primary" type="submit">${icon("shield")}Verify OTP</button>
+      <div class="form-row">
+        <button class="link-button" type="button" data-resend-otp>Resend OTP</button>
+        <button class="link-button" type="button" data-switch-login>Back to login</button>
+      </div>
+      <p class="notice ${message ? "ok" : ""}" data-notice>${message}</p>
+    </form>
+  `;
+}
+
 function resetPasswordForm(message) {
   return h`
     <form class="form" data-reset-password-form>
@@ -619,7 +640,9 @@ function bindAuth() {
   document.querySelector("[data-switch-login]")?.addEventListener("click", () => openAuth("login"));
   document.querySelector("[data-login-form]")?.addEventListener("submit", submitLogin);
   document.querySelector("[data-register-form]")?.addEventListener("submit", submitRegister);
+  document.querySelector("[data-forgot-otp-form]")?.addEventListener("submit", submitForgotOtp);
   document.querySelector("[data-reset-password-form]")?.addEventListener("submit", submitResetPassword);
+  document.querySelector("[data-resend-otp]")?.addEventListener("click", resendForgotOtp);
   document.querySelector("[data-otp]")?.addEventListener("click", requestOtp);
   document.querySelector("[data-forgot]")?.addEventListener("click", forgotPassword);
   document.querySelectorAll("[data-toggle-password]").forEach(button => button.addEventListener("click", togglePasswordVisibility));
@@ -731,7 +754,38 @@ async function forgotPassword() {
   try {
     const payload = await api("/api/auth/forgot-password", { method: "POST", body: { email } });
     state.passwordResetEmail = email;
-    openAuth("reset", state.selectedRole, payload.message);
+    openAuth("otp", state.selectedRole, payload.message);
+  } catch (error) {
+    setNotice(error.message);
+  }
+}
+
+async function resendForgotOtp(event) {
+  const button = event.currentTarget;
+  if (!state.passwordResetEmail) return openAuth("login", state.selectedRole);
+  button.disabled = true;
+  try {
+    const payload = await api("/api/auth/forgot-password", { method: "POST", body: { email: state.passwordResetEmail } });
+    setNotice(payload.message, true);
+  } catch (error) {
+    setNotice(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function submitForgotOtp(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const body = formData(form);
+  const otp = String(body.otp || "").trim();
+  if (!/^\d{6}$/.test(otp)) return setNotice("Invalid OTP.");
+  try {
+    const payload = await api("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { email: state.passwordResetEmail, otp }
+    });
+    openAuth("reset", state.selectedRole, payload.message || "OTP verified.");
   } catch (error) {
     setNotice(error.message);
   }

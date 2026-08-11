@@ -1,4 +1,5 @@
 const http = require("node:http");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
@@ -29,7 +30,16 @@ const {
   validatePassword
 } = require("./security");
 const { ROLE_REDIRECTS, DASHBOARD_PERMISSIONS } = require("./rbac");
-const { findAuthUserByEmail, updateAuthUserPassword } = require("./auth-store");
+const {
+  findAuthUserByEmail,
+  updateAuthUserPassword,
+  countRecentPasswordOtpRequests,
+  createPasswordResetOtp,
+  invalidatePasswordResetOtpsByEmail,
+  verifyPasswordResetOtp,
+  resetAuthPasswordWithToken
+} = require("./auth-store");
+const { requireEmailConfig, sendPasswordResetOtpEmail } = require("./email");
 
 initDb();
 
@@ -43,6 +53,7 @@ const publicAuthRoutes = new Set([
   "POST /api/auth/otp/request",
   "POST /api/auth/otp/verify",
   "POST /api/auth/forgot-password",
+  "POST /api/auth/forgot-password/verify",
   "POST /api/auth/reset-password",
   "POST /api/auth/refresh",
   "POST /api/auth/tab-close"
@@ -97,7 +108,7 @@ function applySecurityHeaders(res) {
 function enforceRateLimit(req, res) {
   const key = `${getIp(req)}:${req.method}:${new URL(req.url, "http://localhost").pathname}`;
   const windowMs = 60 * 1000;
-  const max = key.includes("/api/auth/login") ? 8 : 120;
+  const max = key.includes("/api/auth/login") ? 8 : key.includes("/api/auth/forgot-password") ? 5 : 120;
   const current = Date.now();
   const bucket = rateBuckets.get(key) || { count: 0, resetAt: current + windowMs };
   if (bucket.resetAt < current) {
@@ -550,44 +561,92 @@ async function verifyOtp(req, res) {
   createAuthResponse(req, res, user, Boolean(body.rememberMe), "OTP Login");
 }
 
+function passwordResetHash(email, value) {
+  return crypto
+    .createHmac("sha256", process.env.JWT_SECRET || "")
+    .update(`${String(email || "").trim().toLowerCase()}:${String(value || "")}`)
+    .digest("hex");
+}
+
 async function forgotPassword(req, res) {
   const body = await parseJsonBody(req);
   const email = String(body.email || "").trim().toLowerCase();
   if (!email) return sendError(res, 400, "Email is required");
-  const user = getUserByEmail(email);
-  const authUser = user ? null : await findAuthUserByEmail(email).catch(() => null);
-  const resetEmail = user?.email || authUser?.email;
-  if (!resetEmail) return sendError(res, 404, "Email address is not registered");
-  setResetCookie(res, createResetToken(resetEmail));
-  audit(req, user?.id || null, "Password Reset", { stage: "verified", email: resetEmail });
-  sendJson(res, 200, { message: "Reset request verified. Enter a new password." });
+  const localUser = getUserByEmail(email);
+  const authUser = await findAuthUserByEmail(email).catch(() => null);
+  if (!authUser && !localUser) return sendError(res, 404, "Email address is not registered");
+  if (!authUser) return sendError(res, 400, "Password reset email is available only for registered authentication accounts");
+
+  const recentRequests = await countRecentPasswordOtpRequests(email, new Date(Date.now() - 15 * 60 * 1000).toISOString());
+  if (recentRequests >= 3) return sendError(res, 429, "Too many OTP requests. Please try again later.");
+
+  requireEmailConfig();
+  const otp = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  await createPasswordResetOtp({
+    authUserId: authUser.id,
+    email,
+    otpHash: passwordResetHash(email, otp),
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    requestIp: getIp(req),
+    userAgent: req.headers["user-agent"] || ""
+  });
+
+  try {
+    await sendPasswordResetOtpEmail({ to: authUser.email, name: authUser.full_name, otp });
+  } catch (error) {
+    await invalidatePasswordResetOtpsByEmail(email).catch(() => {});
+    throw error;
+  }
+
+  audit(req, localUser?.id || null, "Password Reset", { stage: "otp_requested", email });
+  sendJson(res, 200, { message: "OTP has been sent to your registered email." });
+}
+
+async function verifyForgotPasswordOtp(req, res) {
+  const body = await parseJsonBody(req);
+  const email = String(body.email || "").trim().toLowerCase();
+  const otp = String(body.otp || "").trim();
+  if (!email) return sendError(res, 400, "Email is required");
+  if (!/^\d{6}$/.test(otp)) return sendError(res, 400, "Invalid OTP");
+
+  const resetToken = randomToken(32);
+  const result = await verifyPasswordResetOtp({
+    email,
+    otpHash: passwordResetHash(email, otp),
+    resetTokenHash: sha256(resetToken),
+    resetExpiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  });
+  if (!result.ok && result.reason === "expired") return sendError(res, 410, "OTP has expired. Please request a new OTP.");
+  if (!result.ok && result.reason === "too_many_attempts") return sendError(res, 429, "Too many invalid OTP attempts. Please request a new OTP.");
+  if (!result.ok) return sendError(res, 401, "Invalid OTP");
+
+  setResetCookie(res, resetToken);
+  sendJson(res, 200, { message: "OTP verified. Enter a new password." });
 }
 
 async function resetPassword(req, res) {
   const body = await parseJsonBody(req);
+  const email = String(body.email || "").trim().toLowerCase();
   const resetToken = String(body.token || parseCookies(req).talme_reset || "").trim();
-  const resetEmail = resetEmailFromToken(resetToken);
-  if (!resetEmail) {
-    clearResetCookie(res);
-    return sendError(res, 400, "Reset verification is required");
-  }
+  if (!email || !resetToken) return sendError(res, 400, "Reset verification is required");
   if (body.confirmPassword != null && body.password !== body.confirmPassword) {
     return sendError(res, 400, "Password and Confirm Password must match");
   }
   if (!validatePassword(body.password)) return sendError(res, 400, "Password must be at least 8 characters with uppercase, lowercase, number, and special character");
 
-  const user = getUserByEmail(resetEmail);
-  const authUser = await updateAuthUserPassword(resetEmail, body.password).catch(() => null);
-  if (!user && !authUser) {
+  const result = await resetAuthPasswordWithToken({ email, resetTokenHash: sha256(resetToken), password: body.password }).catch(() => ({ ok: false }));
+  if (!result.ok) {
     clearResetCookie(res);
     return sendError(res, 401, "Invalid or expired reset token");
   }
-  if (user) {
-    db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(body.password), now(), user.id);
-    db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ?").run(now(), user.id);
-    audit(req, user.id, "Password Reset", { stage: "completed" });
+
+  const localUser = getUserByEmail(email);
+  if (localUser) {
+    db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(body.password), now(), localUser.id);
+    db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ?").run(now(), localUser.id);
+    audit(req, localUser.id, "Password Reset", { stage: "completed" });
   } else {
-    audit(req, null, "Password Reset", { stage: "completed", email: resetEmail });
+    audit(req, null, "Password Reset", { stage: "completed", email });
   }
   clearResetCookie(res);
   sendJson(res, 200, { message: "Password reset successful. You can now login with your new password." });
@@ -2202,6 +2261,7 @@ const routes = {
   "POST /api/auth/otp/request": requestOtp,
   "POST /api/auth/otp/verify": verifyOtp,
   "POST /api/auth/forgot-password": forgotPassword,
+  "POST /api/auth/forgot-password/verify": verifyForgotPasswordOtp,
   "POST /api/auth/reset-password": resetPassword,
   "POST /api/auth/refresh": refresh,
   "POST /api/auth/logout": logout,
