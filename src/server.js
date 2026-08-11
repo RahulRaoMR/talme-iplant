@@ -345,8 +345,8 @@ function clearRefreshCookie(res) {
 
 function primaryRoleForRequestedLogin(user, requestedRole) {
   const roles = rolesForUser(user.id).map(role => role.slug);
-  if (!requestedRole || roles.includes(requestedRole)) return roles[0];
-  return null;
+  if (requestedRole && roles.includes(requestedRole)) return requestedRole;
+  return roles[0] || null;
 }
 
 function createAuthResponse(req, res, user, rememberMe = false, action = "Login") {
@@ -376,9 +376,10 @@ async function login(req, res) {
     audit(req, user?.id || null, "Failed Login", { email });
     return sendError(res, 401, "Invalid email or password");
   }
-  if (!primaryRoleForRequestedLogin(user, body.role)) {
+  const loginRole = primaryRoleForRequestedLogin(user, body.role);
+  if (!loginRole) {
     logLogin(req, user, false, "Failed Login", "Role not assigned", email);
-    return sendError(res, 403, "This role is not assigned to your account");
+    return sendError(res, 403, "No role is assigned to your account");
   }
   if (user.two_factor_enabled && body.twoFactorCode !== "000000") {
     logLogin(req, user, false, "2FA Required", "Missing or invalid 2FA code", email);
