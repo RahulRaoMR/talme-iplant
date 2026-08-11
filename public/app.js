@@ -482,32 +482,25 @@ function authModal(message = "") {
 }
 
 function loginForm(message) {
-  const suggestedEmail = demoEmail(state.selectedRole);
   return h`
     <form class="form" data-login-form>
       <input type="hidden" name="role" value="${state.selectedRole}">
       <div class="field">
         <label>Email</label>
-        <input name="email" type="email" placeholder="${suggestedEmail}" autocomplete="off" required>
-        <small class="field-hint">Enter the email address manually.</small>
+        <input name="email" type="email" placeholder="Enter your registered email" autocomplete="email" required>
+        <small class="field-hint">Enter your registered email address.</small>
       </div>
       <div class="field">
         <label>Password</label>
-        <input name="password" type="password" placeholder="Enter password manually" autocomplete="off" required>
+        <input name="password" type="password" placeholder="Enter your password" autocomplete="current-password" required>
       </div>
-      <div class="field">
-        <label>Two-Factor Authentication (2FA)</label>
-        <input name="twoFactorCode" inputmode="numeric" placeholder="Enter 2FA code manually if required">
-      </div>
+
       <div class="form-row">
         <label class="check"><input name="rememberMe" type="checkbox"> Remember Me</label>
         <button type="button" class="link-button" data-forgot>Forgot Password</button>
       </div>
       <button class="btn primary" type="submit">${icon("lock")}Login using Email + Password</button>
-      <div class="form-row">
-        <input name="otpContact" placeholder="Mobile or email for OTP" aria-label="Mobile or email for OTP">
-        <button class="btn" type="button" data-otp>Login using Mobile OTP</button>
-      </div>
+
       <p class="notice ${message ? "ok" : ""}" data-notice>${message}</p>
       <button class="link-button" type="button" data-switch-register>Need registration?</button>
     </form>
