@@ -352,6 +352,24 @@ function clearRefreshCookie(res) {
   }));
 }
 
+function setResetCookie(res, resetToken) {
+  res.setHeader("Set-Cookie", cookie("talme_reset", resetToken, {
+    httpOnly: true,
+    secure: Boolean(process.env.VERCEL),
+    sameSite: "Strict",
+    maxAge: 60 * 60
+  }));
+}
+
+function clearResetCookie(res) {
+  res.setHeader("Set-Cookie", cookie("talme_reset", "", {
+    httpOnly: true,
+    secure: Boolean(process.env.VERCEL),
+    sameSite: "Strict",
+    maxAge: 0
+  }));
+}
+
 function primaryRoleForRequestedLogin(user, requestedRole) {
   const roles = rolesForUser(user.id).map(role => role.slug);
   const permissions = permissionsForUser(user.id);
@@ -521,19 +539,24 @@ async function verifyOtp(req, res) {
 
 async function forgotPassword(req, res) {
   const body = await parseJsonBody(req);
-  const user = getUserByEmail(String(body.email || "").trim());
-  if (!user) return sendJson(res, 200, { message: "If this email exists, a reset link has been sent." });
+  const email = String(body.email || "").trim();
+  if (!email) return sendError(res, 400, "Email is required");
+  const user = getUserByEmail(email);
+  if (!user) return sendError(res, 404, "Email address is not registered");
   const token = randomToken(32);
   db.prepare(`
     INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, created_at)
     VALUES (?, ?, ?, ?)
   `).run(user.id, sha256(token), new Date(Date.now() + 60 * 60 * 1000).toISOString(), now());
+  setResetCookie(res, token);
   audit(req, user.id, "Password Reset", { stage: "requested" });
-  sendJson(res, 200, { message: "Password reset link generated", devResetToken: token });
+  sendJson(res, 200, { message: "Reset request verified. Enter a new password." });
 }
 
 async function resetPassword(req, res) {
   const body = await parseJsonBody(req);
+  const resetToken = String(body.token || parseCookies(req).talme_reset || "").trim();
+  if (!resetToken) return sendError(res, 400, "Reset verification is required");
   if (body.confirmPassword != null && body.password !== body.confirmPassword) {
     return sendError(res, 400, "Password and Confirm Password must match");
   }
@@ -541,13 +564,17 @@ async function resetPassword(req, res) {
   const token = db.prepare(`
     SELECT * FROM password_reset_tokens
     WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
-  `).get(sha256(body.token), now());
-  if (!token) return sendError(res, 401, "Invalid or expired reset token");
+  `).get(sha256(resetToken), now());
+  if (!token) {
+    clearResetCookie(res);
+    return sendError(res, 401, "Invalid or expired reset token");
+  }
   db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(body.password), now(), token.user_id);
   db.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?").run(now(), token.id);
   db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ?").run(now(), token.user_id);
   audit(req, token.user_id, "Password Reset", { stage: "completed" });
-  sendJson(res, 200, { message: "Password reset successful" });
+  clearResetCookie(res);
+  sendJson(res, 200, { message: "Password reset successful. You can now login with your new password." });
 }
 
 async function refresh(req, res) {

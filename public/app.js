@@ -13,7 +13,8 @@ const state = {
   expandedEmployeeSkills: new Set(),
   hrImportConfirmation: "",
   skipUnloadLogout: false,
-  unloadLogoutSent: false
+  unloadLogoutSent: false,
+  passwordResetEmail: ""
 };
 
 localStorage.removeItem("talme_access");
@@ -468,17 +469,31 @@ function authModal(message = "") {
         </aside>
         <section class="auth-right">
           <div class="modal-top">
-            <h2>${state.authMode === "login" ? "Welcome back" : "Create account"}</h2>
+            <h2>${authTitle()}</h2>
             <button class="btn icon" title="Close" data-close>${icon("x")}</button>
           </div>
-          <div class="tabs">
-            ${roleTabs.map(([role, label]) => `<button class="tab ${state.selectedRole === role ? "active" : ""}" data-tab="${role}">${label}</button>`).join("")}
-          </div>
-          ${state.authMode === "login" ? loginForm(message) : registerForm(message)}
+          ${["login", "register"].includes(state.authMode) ? `
+            <div class="tabs">
+              ${roleTabs.map(([role, label]) => `<button class="tab ${state.selectedRole === role ? "active" : ""}" data-tab="${role}">${label}</button>`).join("")}
+            </div>
+          ` : ""}
+          ${authContent(message)}
         </section>
       </section>
     </div>
   `;
+}
+
+function authTitle() {
+  if (state.authMode === "register") return "Create account";
+  if (state.authMode === "reset") return "Reset password";
+  return "Welcome back";
+}
+
+function authContent(message = "") {
+  if (state.authMode === "register") return registerForm(message);
+  if (state.authMode === "reset") return resetPasswordForm(message);
+  return loginForm(message);
 }
 
 function loginForm(message) {
@@ -548,6 +563,30 @@ function registerForm(message) {
   `;
 }
 
+function resetPasswordForm(message) {
+  return h`
+    <form class="form" data-reset-password-form>
+      <div class="field">
+        <label>New Password</label>
+        <div class="password-wrap">
+          <input name="password" type="password" autocomplete="new-password" placeholder="Min 8 chars, uppercase, number, special character" required>
+          <button type="button" class="password-toggle" data-toggle-password="password" title="Show password">${icon("eye")}</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Confirm New Password</label>
+        <div class="password-wrap">
+          <input name="confirmPassword" type="password" autocomplete="new-password" required>
+          <button type="button" class="password-toggle" data-toggle-password="confirmPassword" title="Show password">${icon("eye")}</button>
+        </div>
+      </div>
+      <button class="btn primary" type="submit">${icon("lock")}Update password</button>
+      <p class="notice ${message ? "ok" : ""}" data-notice>${message}</p>
+      <button class="link-button" type="button" data-switch-login>Back to login</button>
+    </form>
+  `;
+}
+
 function demoEmail(role) {
   const map = {
     candidate: "candidate@talme.test",
@@ -580,6 +619,7 @@ function bindAuth() {
   document.querySelector("[data-switch-login]")?.addEventListener("click", () => openAuth("login"));
   document.querySelector("[data-login-form]")?.addEventListener("submit", submitLogin);
   document.querySelector("[data-register-form]")?.addEventListener("submit", submitRegister);
+  document.querySelector("[data-reset-password-form]")?.addEventListener("submit", submitResetPassword);
   document.querySelector("[data-otp]")?.addEventListener("click", requestOtp);
   document.querySelector("[data-forgot]")?.addEventListener("click", forgotPassword);
   document.querySelectorAll("[data-toggle-password]").forEach(button => button.addEventListener("click", togglePasswordVisibility));
@@ -686,10 +726,36 @@ async function requestOtp() {
 }
 
 async function forgotPassword() {
-  const email = document.querySelector("[data-login-form] [name=email]")?.value;
+  const email = document.querySelector("[data-login-form] [name=email]")?.value.trim();
+  if (!email) return setNotice("Enter your registered email first.");
   try {
     const payload = await api("/api/auth/forgot-password", { method: "POST", body: { email } });
-    setNotice(`${payload.message}${payload.devResetToken ? ` Demo token: ${payload.devResetToken}` : ""}`, true);
+    state.passwordResetEmail = email;
+    openAuth("reset", state.selectedRole, payload.message);
+  } catch (error) {
+    setNotice(error.message);
+  }
+}
+
+async function submitResetPassword(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const body = formData(form);
+  if (body.password !== body.confirmPassword) return setNotice("Password and Confirm Password must match");
+  if (!isStrongPassword(body.password)) {
+    return setNotice("Password must be at least 8 characters and include uppercase, lowercase, number, and special character");
+  }
+  try {
+    const payload = await api("/api/auth/reset-password", {
+      method: "POST",
+      body: {
+        email: state.passwordResetEmail,
+        password: body.password,
+        confirmPassword: body.confirmPassword
+      }
+    });
+    state.passwordResetEmail = "";
+    openAuth("login", state.selectedRole, payload.message);
   } catch (error) {
     setNotice(error.message);
   }
