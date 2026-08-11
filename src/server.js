@@ -59,6 +59,13 @@ function sendError(res, statusCode, message, details) {
   sendJson(res, statusCode, { error: message, details });
 }
 
+function healthCheck(req, res) {
+  sendJson(res, 200, {
+    success: true,
+    message: "Talme Backend Running"
+  });
+}
+
 function securityHeaders() {
   return {
     "X-Content-Type-Options": "nosniff",
@@ -2134,6 +2141,7 @@ function serveStatic(req, res, pathname) {
 }
 
 const routes = {
+  "GET /api/health": healthCheck,
   "POST /api/auth/login": login,
   "POST /api/auth/social": socialLogin,
   "POST /api/auth/register": register,
