@@ -1629,6 +1629,13 @@ async function loadHrEmployees() {
     state.hrEmployeeVisibleCount = 50;
     renderHrEmployees();
   } catch (error) {
+    if (error.status === 401) {
+      clearStoredAuth();
+      renderLandingPage();
+      openAuth("login", state.selectedRole);
+      setNotice("Please login again to view employees.");
+      return;
+    }
     target.innerHTML = `<div class="security-empty">${escapeHtml(error.message)}</div>`;
   }
 }
