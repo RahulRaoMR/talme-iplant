@@ -29,6 +29,7 @@ const {
   validatePassword
 } = require("./security");
 const { ROLE_REDIRECTS, DASHBOARD_PERMISSIONS } = require("./rbac");
+const { findAuthUserByEmail, updateAuthUserPassword } = require("./auth-store");
 
 initDb();
 
@@ -370,6 +371,18 @@ function clearResetCookie(res) {
   }));
 }
 
+function createResetToken(email) {
+  return signJwt({ purpose: "password_reset", email: String(email || "").trim().toLowerCase() }, 60 * 60);
+}
+
+function resetEmailFromToken(token) {
+  const payload = verifyJwt(token);
+  if (payload?.purpose !== "password_reset" || !payload.email) return null;
+  return String(payload.email).trim().toLowerCase();
+}
+
+
+
 function primaryRoleForRequestedLogin(user, requestedRole) {
   const roles = rolesForUser(user.id).map(role => role.slug);
   const permissions = permissionsForUser(user.id);
@@ -539,40 +552,43 @@ async function verifyOtp(req, res) {
 
 async function forgotPassword(req, res) {
   const body = await parseJsonBody(req);
-  const email = String(body.email || "").trim();
+  const email = String(body.email || "").trim().toLowerCase();
   if (!email) return sendError(res, 400, "Email is required");
   const user = getUserByEmail(email);
-  if (!user) return sendError(res, 404, "Email address is not registered");
-  const token = randomToken(32);
-  db.prepare(`
-    INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, created_at)
-    VALUES (?, ?, ?, ?)
-  `).run(user.id, sha256(token), new Date(Date.now() + 60 * 60 * 1000).toISOString(), now());
-  setResetCookie(res, token);
-  audit(req, user.id, "Password Reset", { stage: "requested" });
+  const authUser = user ? null : await findAuthUserByEmail(email).catch(() => null);
+  const resetEmail = user?.email || authUser?.email;
+  if (!resetEmail) return sendError(res, 404, "Email address is not registered");
+  setResetCookie(res, createResetToken(resetEmail));
+  audit(req, user?.id || null, "Password Reset", { stage: "verified", email: resetEmail });
   sendJson(res, 200, { message: "Reset request verified. Enter a new password." });
 }
 
 async function resetPassword(req, res) {
   const body = await parseJsonBody(req);
   const resetToken = String(body.token || parseCookies(req).talme_reset || "").trim();
-  if (!resetToken) return sendError(res, 400, "Reset verification is required");
+  const resetEmail = resetEmailFromToken(resetToken);
+  if (!resetEmail) {
+    clearResetCookie(res);
+    return sendError(res, 400, "Reset verification is required");
+  }
   if (body.confirmPassword != null && body.password !== body.confirmPassword) {
     return sendError(res, 400, "Password and Confirm Password must match");
   }
   if (!validatePassword(body.password)) return sendError(res, 400, "Password must be at least 8 characters with uppercase, lowercase, number, and special character");
-  const token = db.prepare(`
-    SELECT * FROM password_reset_tokens
-    WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
-  `).get(sha256(resetToken), now());
-  if (!token) {
+
+  const user = getUserByEmail(resetEmail);
+  const authUser = await updateAuthUserPassword(resetEmail, body.password).catch(() => null);
+  if (!user && !authUser) {
     clearResetCookie(res);
     return sendError(res, 401, "Invalid or expired reset token");
   }
-  db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(body.password), now(), token.user_id);
-  db.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?").run(now(), token.id);
-  db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ?").run(now(), token.user_id);
-  audit(req, token.user_id, "Password Reset", { stage: "completed" });
+  if (user) {
+    db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(body.password), now(), user.id);
+    db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ?").run(now(), user.id);
+    audit(req, user.id, "Password Reset", { stage: "completed" });
+  } else {
+    audit(req, null, "Password Reset", { stage: "completed", email: resetEmail });
+  }
   clearResetCookie(res);
   sendJson(res, 200, { message: "Password reset successful. You can now login with your new password." });
 }
