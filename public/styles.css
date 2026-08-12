@@ -1394,11 +1394,28 @@ button.role-metric {
   border: 1px solid #d7e0ea;
   border-radius: 8px;
   background: #ffffff;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .employee-list-summary strong {
   margin: 0 4px;
   color: #0f172a;
+}
+
+.employee-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #14b87a;
+  box-shadow: 0 0 0 4px rgba(20, 184, 122, 0.12);
+}
+
+.live-label {
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .employee-panel-head {
@@ -1660,6 +1677,23 @@ button.role-metric {
   background: transparent;
   padding: 0;
   font: inherit;
+}
+
+.employee-audit-line {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e6edf5;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.profile-audit-line {
+  margin-top: 14px;
+  max-width: 100%;
 }
 
 .employee-edit-notice {
@@ -2173,6 +2207,10 @@ button.role-metric {
   max-width: 540px;
 }
 
+.update-history-grid strong {
+  white-space: normal;
+}
+
 .experience-line {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
@@ -2447,9 +2485,11 @@ button.role-metric {
   background: #eff6ff;
   padding: 14px;
 }
+
 .import-progress[hidden] {
   display: none;
 }
+
 .import-progress-head {
   display: flex;
   align-items: center;
@@ -2458,16 +2498,19 @@ button.role-metric {
   color: #1e3a8a;
   font-size: 14px;
 }
+
 .import-progress-head span {
   white-space: nowrap;
   font-weight: 800;
 }
+
 .import-progress-track {
   height: 10px;
   overflow: hidden;
   border-radius: 999px;
   background: #dbeafe;
 }
+
 .import-progress-track span {
   display: block;
   width: 0;
@@ -2476,6 +2519,7 @@ button.role-metric {
   background: linear-gradient(90deg, #2563eb, #0f766e);
   transition: width .25s ease;
 }
+
 .import-card-list {
   display: grid;
   gap: 14px;
@@ -3033,6 +3077,7 @@ body.dark .employee-list-summary,
 body.dark .candidate-meta,
 body.dark .candidate-info-grid > span,
 body.dark .candidate-bottom,
+body.dark .employee-audit-line,
 body.dark .candidate-result-side p,
 body.dark .candidate-result-side small,
 body.dark .candidate-profile-meta,
@@ -3089,6 +3134,10 @@ body.dark .field textarea {
   border-color: #2c3b4d;
   background: #121b26;
   color: #edf3f9;
+}
+
+body.dark .employee-audit-line {
+  border-top-color: #263545;
 }
 
 body.dark .candidate-result-side,
@@ -3286,6 +3335,12 @@ body.dark .data-panel-backdrop {
   .candidate-result-side {
     border-left: 0;
     border-top: 1px solid #e1e7f0;
+  }
+
+  .employee-audit-line {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
   }
 
   .candidate-profile-card {

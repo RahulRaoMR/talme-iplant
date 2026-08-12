@@ -319,78 +319,9 @@ function assignRole(userId, roleSlug, companyId = null) {
   `).run(userId, role.id, companyId, now());
 }
 
-function seedDemoUsers() {
-  const count = db.prepare("SELECT COUNT(*) AS total FROM users").get().total;
-  if (count > 0) return;
-
-  const talme = createCompany("Talme Technologies", "talme.test");
-  const acme = createCompany("Acme Talent Labs", "acme.test");
-  const password = "Password123!";
-
-  const users = [
-    ["Candidate One", "candidate@talme.test", "9000000001", "candidate", null],
-    ["Employer One", "employer@talme.test", "9000000002", "employer", acme.id],
-    ["Recruiter One", "recruiter@talme.test", "9000000003", "recruiter", acme.id],
-    ["Employee One", "employee@talme.test", "9000000004", "employee", acme.id],
-    ["HR Manager One", "hr@talme.test", "9000000005", "hr_manager", acme.id],
-    ["Company Admin One", "company.admin@talme.test", "9000000006", "company_admin", acme.id],
-    ["Platform Admin One", "platform.admin@talme.test", "9000000007", "platform_admin", talme.id],
-    ["Super Admin One", "super.admin@talme.test", "9000000008", "super_admin", talme.id]
-  ];
-
-  for (const [name, email, phone, roleSlug, companyId] of users) {
-    const userId = createUser({ name, email, phone, password, roleSlug, companyId });
-    if (roleSlug === "candidate") {
-      db.prepare(`
-        INSERT OR IGNORE INTO candidate_accounts (user_id, headline, skills, created_at)
-        VALUES (?, ?, ?, ?)
-      `).run(userId, "Product-minded frontend engineer", "React, Node, SQL", now());
-    }
-    if (companyId) {
-      db.prepare(`
-        INSERT INTO company_users (company_id, user_id, role_title, status, created_at)
-        VALUES (?, ?, ?, 'active', ?)
-      `).run(companyId, userId, roleSlug.replaceAll("_", " "), now());
-      if (["employee", "hr_manager", "company_admin"].includes(roleSlug)) {
-        db.prepare(`
-          INSERT OR IGNORE INTO employee_accounts (user_id, company_id, employee_code, designation, department, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(userId, companyId, `EMP-${userId}`, roleSlug.replaceAll("_", " "), "People Operations", now());
-      }
-    }
-  }
-}
-
-function ensureConfiguredAdmin() {
-  const talme = createCompany("Talme Technologies", "talme.test");
-  const email = "saidarshaan@talme.in";
-  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
-  if (existing) {
-    db.prepare(`
-      UPDATE users
-      SET name = ?, password_hash = ?, status = 'active', email_verified = 1, updated_at = ?
-      WHERE id = ?
-    `).run("Saidarshaan", hashPassword("talme123"), now(), existing.id);
-    assignRole(existing.id, "super_admin", talme.id);
-    return;
-  }
-
-  createUser({
-    name: "Saidarshaan",
-    email,
-    phone: "9000000099",
-    password: "talme123",
-    roleSlug: "super_admin",
-    companyId: talme.id,
-    emailVerified: true
-  });
-}
-
 function initDb() {
   migrate();
   seedRolesAndPermissions();
-  seedDemoUsers();
-  ensureConfiguredAdmin();
 }
 
 module.exports = {

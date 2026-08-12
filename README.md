@@ -1,6 +1,8 @@
 # Talme Enterprise Auth
 
-A self-contained Node + SQLite implementation of enterprise authentication, RBAC, session security, audit logging, and a premium responsive login/registration UI.
+A Node + Neon PostgreSQL authentication system with local RBAC/session mirrors, audit logging, and a responsive login/registration UI.
+
+Only users created through the Create Account form can log in. Login checks the Neon `auth_users` table only, with bcrypt password verification and JWT session creation.
 
 ## Run
 
@@ -10,30 +12,27 @@ npm start
 
 Open `http://localhost:4000`.
 
-## Demo Users
+## Required Environment
 
-All demo users use password `Password123!`.
+Set these values in Vercel Production and in your local shell when running the server:
 
-| Role | Email |
-| --- | --- |
-| Candidate | candidate@talme.test |
-| Employer | employer@talme.test |
-| Recruiter | recruiter@talme.test |
-| Employee | employee@talme.test |
-| HR Manager | hr@talme.test |
-| Company Admin | company.admin@talme.test |
-| Platform Admin | platform.admin@talme.test |
-| Super Admin | super.admin@talme.test |
+```powershell
+DATABASE_URL="postgresql://USER:PASSWORD@HOST/DB?sslmode=require"
+JWT_SECRET="replace-with-a-long-random-production-secret"
+RESEND_API_KEY="re_..."
+RESEND_FROM_EMAIL=noreply@iplant.talme.in
+AUTH_EMAIL_FROM="Talme HR <noreply@iplant.talme.in>"
+APP_URL="https://iplant.talme.in"
+```
 
-Registration for employees is invite-only. Use invite code `TALME-EMPLOYEE-2026`.
+Set `EMPLOYEE_INVITE_CODE` only if employee self-registration should be enabled.
 
 ## Key APIs
 
 - `POST /api/auth/login`
 - `POST /api/auth/register`
-- `POST /api/auth/otp/request`
-- `POST /api/auth/otp/verify`
 - `POST /api/auth/forgot-password`
+- `POST /api/auth/forgot-password/verify`
 - `POST /api/auth/reset-password`
 - `POST /api/auth/refresh`
 - `POST /api/auth/logout`

@@ -1,7 +1,7 @@
 const http = require("node:http");
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const zlib = require("node:zlib");
 const xlsx = require("xlsx");
 const { db, initDb, now, createCompany, createUser, assignRole } = require("./db");
@@ -16,7 +16,6 @@ const {
 } = require("./config");
 const {
   parseJsonBody,
-  verifyPassword,
   hashPassword,
   sha256,
   randomToken,
@@ -31,13 +30,24 @@ const {
 } = require("./security");
 const { ROLE_REDIRECTS, DASHBOARD_PERMISSIONS } = require("./rbac");
 const {
+  hasNeonAuth,
   findAuthUserByEmail,
-  updateAuthUserPassword,
+  createAuthUser,
+  verifyAuthPassword,
+  createAuthSession,
+  findAuthSessionByKey,
+  findAuthSessionByRefreshHash,
+  touchAuthSession,
+  revokeAuthSessionByKey,
+  revokeAuthSessionByRefreshHash,
+  revokeAuthSessionsByEmail,
   countRecentPasswordOtpRequests,
   createPasswordResetOtp,
   invalidatePasswordResetOtpsByEmail,
   verifyPasswordResetOtp,
-  resetAuthPasswordWithToken
+  resetAuthPasswordWithToken,
+  upsertEmployeeRecordAudit,
+  getEmployeeRecordAudits
 } = require("./auth-store");
 const { requireEmailConfig, sendPasswordResetOtpEmail } = require("./email");
 
@@ -48,16 +58,23 @@ const candidateImportDrafts = new Map();
 const candidateImportTtlMs = 15 * 60 * 1000;
 const publicAuthRoutes = new Set([
   "POST /api/auth/login",
-  "POST /api/auth/social",
   "POST /api/auth/register",
-  "POST /api/auth/otp/request",
-  "POST /api/auth/otp/verify",
   "POST /api/auth/forgot-password",
   "POST /api/auth/forgot-password/verify",
   "POST /api/auth/reset-password",
   "POST /api/auth/refresh",
   "POST /api/auth/tab-close"
 ]);
+
+const REGISTRATION_ROLE_BY_TYPE = {
+  candidate: "candidate",
+  employer: "employer",
+  recruiter: "recruiter",
+  employee: "employee",
+  company: "company_admin",
+  admin: "super_admin",
+  talme_hr: "hr_manager"
+};
 
 function sendJson(res, statusCode, payload, headers = {}) {
   res.writeHead(statusCode, {
@@ -132,6 +149,10 @@ function getUserByEmail(email) {
 
 function getUserByPhone(phone) {
   return db.prepare("SELECT * FROM users WHERE phone = ?").get(phone);
+}
+
+function sendAuthFailure(res, statusCode, message, details) {
+  sendJson(res, statusCode, { success: false, message, error: message, details });
 }
 
 function rolesForUser(userId) {
@@ -269,21 +290,55 @@ function createSession(req, user, rememberMe = false) {
     now()
   );
   const sessionId = Number(result.lastInsertRowid);
+  const authSessionKey = randomToken(24);
   const roles = rolesForUser(user.id).map(role => role.slug);
   const permissions = permissionsForUser(user.id);
-  const accessToken = signJwt({ sub: user.id, sid: sessionId, roles, permissions });
-  return { accessToken, refreshToken, csrfToken, sessionId, expiresAt };
+  const accessToken = signJwt({ sub: user.id, sid: sessionId, authSid: authSessionKey, email: user.email, roles, permissions, csrf: csrfToken });
+  return { accessToken, refreshToken, csrfToken, sessionId, authSessionKey, expiresAt };
 }
 
-function authenticate(req) {
+function bearerPayload(req) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  const payload = verifyJwt(token);
+  return verifyJwt(token);
+}
+
+async function persistentAuthContext(req, payload) {
+  if (!payload?.authSid) return null;
+  const authSession = await findAuthSessionByKey(payload.authSid);
+  if (!authSession?.is_active) return null;
+  await touchAuthSession(payload.authSid).catch(() => {});
+  const localUser = mirrorAuthUserToLocal({
+    full_name: authSession.full_name,
+    email: authSession.email,
+    phone: authSession.phone,
+    role: authSession.role,
+    is_active: authSession.is_active
+  });
+  return {
+    user: localUser,
+    session: {
+      id: payload.sid,
+      authSessionKey: authSession.session_key,
+      csrf_token: authSession.csrf_token,
+      remember_me: authSession.remember_me,
+      expires_at: authSession.expires_at,
+      last_seen_at: authSession.last_seen_at
+    },
+    payload,
+    safeUser: sanitizeUser(localUser)
+  };
+}
+
+async function authenticate(req) {
+  const payload = bearerPayload(req);
   if (!payload?.sub || !payload?.sid) return null;
+  const persistentSession = payload.authSid ? await findAuthSessionByKey(payload.authSid) : null;
+  if (payload.authSid && !persistentSession?.is_active) return null;
   const session = db.prepare(`
     SELECT * FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > ?
-  `).get(payload.sid, payload.sub, now());
-  if (!session) return null;
+  `).get(Number(payload.sid), Number(payload.sub), now());
+  if (!session) return persistentAuthContext(req, payload);
   const stale = Date.now() - Date.parse(session.last_seen_at) > sessionTimeoutSeconds * 1000;
   if (stale && !session.remember_me) {
     db.prepare("UPDATE sessions SET revoked_at = ? WHERE id = ?").run(now(), session.id);
@@ -294,9 +349,19 @@ function authenticate(req) {
   if (session.device_id) {
     db.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").run(seenAt, session.device_id);
   }
+  if (persistentSession?.session_key) await touchAuthSession(persistentSession.session_key).catch(() => {});
   const user = db.prepare("SELECT * FROM users WHERE id = ? AND status = 'active'").get(payload.sub);
-  if (!user) return null;
-  return { user, session, payload, safeUser: sanitizeUser(user) };
+  if (!user) return persistentAuthContext(req, payload);
+  return {
+    user,
+    session: {
+      ...session,
+      authSessionKey: persistentSession?.session_key || null,
+      csrf_token: persistentSession?.csrf_token || session.csrf_token
+    },
+    payload,
+    safeUser: sanitizeUser(user)
+  };
 }
 
 function authenticateRefreshCookie(req) {
@@ -322,7 +387,7 @@ function hasAnyRole(context, allowedRoles) {
 }
 
 async function requireAuth(req, res, permission = null) {
-  const context = authenticate(req);
+  const context = await authenticate(req);
   if (!context) {
     sendError(res, 401, "Authentication required");
     return null;
@@ -343,7 +408,8 @@ function validateCsrf(req, context) {
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return true;
   const routeKey = `${req.method} ${new URL(req.url, "http://localhost").pathname}`;
   if (publicAuthRoutes.has(routeKey)) return true;
-  return req.headers["x-csrf-token"] && req.headers["x-csrf-token"] === context.session.csrf_token;
+  const expected = context.session?.csrf_token || context.payload?.csrf;
+  return Boolean(req.headers["x-csrf-token"] && expected && req.headers["x-csrf-token"] === expected);
 }
 
 function setRefreshCookie(res, refreshToken, maxAge) {
@@ -364,15 +430,6 @@ function clearRefreshCookie(res) {
   }));
 }
 
-function setResetCookie(res, resetToken) {
-  res.setHeader("Set-Cookie", cookie("talme_reset", resetToken, {
-    httpOnly: true,
-    secure: Boolean(process.env.VERCEL),
-    sameSite: "Strict",
-    maxAge: 60 * 60
-  }));
-}
-
 function clearResetCookie(res) {
   res.setHeader("Set-Cookie", cookie("talme_reset", "", {
     httpOnly: true,
@@ -382,31 +439,70 @@ function clearResetCookie(res) {
   }));
 }
 
-function createResetToken(email) {
-  return signJwt({ purpose: "password_reset", email: String(email || "").trim().toLowerCase() }, 60 * 60);
-}
-
-function resetEmailFromToken(token) {
-  const payload = verifyJwt(token);
-  if (payload?.purpose !== "password_reset" || !payload.email) return null;
-  return String(payload.email).trim().toLowerCase();
-}
-
-
-
 function primaryRoleForRequestedLogin(user, requestedRole) {
   const roles = rolesForUser(user.id).map(role => role.slug);
-  const permissions = permissionsForUser(user.id);
-  if (canUsePreferredRole(roles, permissions, requestedRole)) return requestedRole;
+  if (requestedRole) return roles.includes(requestedRole) ? requestedRole : null;
   return roles[0] || null;
 }
 
-function createAuthResponse(req, res, user, rememberMe = false, action = "Login", preferredRole = null) {
+function normalizeSubmittedPassword(value) {
+  return String(value || "").trim();
+}
+
+function normalizeRequestedRole(value) {
+  return String(value || "").trim();
+}
+
+function roleSlugFromAuthBody(body) {
+  const requestedRole = normalizeRequestedRole(body.role);
+  if (requestedRole) return requestedRole;
+  const type = String(body.type || "").toLowerCase();
+  return REGISTRATION_ROLE_BY_TYPE[type] || "";
+}
+
+function mirrorAuthUserToLocal(authUser) {
+  const roleSlug = authUser.role || "candidate";
+  const needsCompany = ["employer", "recruiter", "employee", "company_admin", "hr_manager", "super_admin", "platform_admin"].includes(roleSlug);
+  const company = needsCompany ? createCompany("Talme Technologies", "talme.test") : null;
+  const userId = createUser({
+    name: authUser.full_name,
+    email: authUser.email,
+    phone: authUser.phone,
+    password: randomToken(24),
+    roleSlug,
+    companyId: company?.id,
+    emailVerified: true
+  });
+  db.prepare(`
+    UPDATE users
+    SET name = ?, phone = ?, status = CASE WHEN ? THEN 'active' ELSE 'inactive' END,
+        email_verified = 1, phone_verified = 1, updated_at = ?
+    WHERE id = ?
+  `).run(authUser.full_name, authUser.phone, authUser.is_active ? 1 : 0, now(), userId);
+  db.prepare("DELETE FROM user_roles WHERE user_id = ?").run(userId);
+  assignRole(userId, roleSlug, company?.id);
+  return db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+}
+
+async function createAuthResponse(req, res, user, rememberMe = false, action = "Login", message = "Login successful.", preferredRole = null) {
   const session = createSession(req, user, rememberMe);
+  await createAuthSession({
+    sessionKey: session.authSessionKey,
+    email: user.email,
+    role: preferredRole || user.role,
+    refreshTokenHash: sha256(session.refreshToken),
+    csrfToken: session.csrfToken,
+    rememberMe,
+    expiresAt: session.expiresAt,
+    ipAddress: getIp(req),
+    userAgent: req.headers["user-agent"] || ""
+  });
   setRefreshCookie(res, session.refreshToken, rememberMe ? rememberMeTtlSeconds : refreshTokenTtlSeconds);
   logLogin(req, user, true, action);
   audit(req, user.id, action, { rememberMe });
   sendJson(res, 200, {
+    success: true,
+    message,
     accessToken: session.accessToken,
     csrfToken: session.csrfToken,
     user: sanitizeUser(user, preferredRole),
@@ -415,51 +511,43 @@ function createAuthResponse(req, res, user, rememberMe = false, action = "Login"
 }
 
 async function login(req, res) {
-  console.log("[iplant-api-trace] login route executing", {
-    method: req.method,
-    url: req.url
-  });
   const body = await parseJsonBody(req);
   const email = String(body.email || "").trim();
-  const password = String(body.password || "");
-  const user = getUserByEmail(email);
-  if (!user || !verifyPassword(password, user.password_hash)) {
-    logLogin(req, user, false, "Failed Login", "Invalid email or password", email);
-    audit(req, user?.id || null, "Failed Login", { email });
-    return sendError(res, 401, "Invalid email or password");
+  const password = normalizeSubmittedPassword(body.password);
+  const requestedRole = roleSlugFromAuthBody(body);
+  if (!email || !password) {
+    return sendAuthFailure(res, 400, "Email and password are required.");
   }
-  const loginRole = primaryRoleForRequestedLogin(user, body.role);
-  if (!loginRole) {
-    logLogin(req, user, false, "Failed Login", "Role not assigned", email);
-    return sendError(res, 403, "No role is assigned to your account");
+  if (!requestedRole) {
+    return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
   }
-  if (user.two_factor_enabled && body.twoFactorCode !== "000000") {
-    logLogin(req, user, false, "2FA Required", "Missing or invalid 2FA code", email);
-    return sendJson(res, 202, { requires2fa: true, message: "Two-factor authentication required. Demo code: 000000" });
-  }
-  createAuthResponse(req, res, user, Boolean(body.rememberMe), "Login", loginRole);
-}
 
-async function socialLogin(req, res) {
-  const body = await parseJsonBody(req);
-  const provider = ["google", "microsoft", "linkedin"].includes(body.provider) ? body.provider : null;
-  if (!provider) return sendError(res, 400, "Unsupported identity provider");
-  const role = body.role || "candidate";
-  const email = String(body.email || `${provider}.${Date.now()}@social.talme.test`).toLowerCase();
-  let user = getUserByEmail(email);
-  if (!user) {
-    createUser({
-      name: body.name || `${provider[0].toUpperCase()}${provider.slice(1)} User`,
-      email,
-      phone: null,
-      password: randomToken(20),
-      roleSlug: role,
-      emailVerified: true
-    });
-    user = getUserByEmail(email);
-    audit(req, user.id, "Profile Updates", { provider, action: "social_account_created" });
+  if (!hasNeonAuth()) {
+    return sendAuthFailure(res, 500, "Authentication database is not configured.");
   }
-  createAuthResponse(req, res, user, true, `${provider} Login`);
+  const authUser = await findAuthUserByEmail(email, requestedRole);
+  if (!authUser) {
+    const anyRoleUser = await findAuthUserByEmail(email);
+    logLogin(req, null, false, "Failed Login", anyRoleUser ? "Requested login role not registered" : "Account not found", email);
+    return sendAuthFailure(res, anyRoleUser ? 403 : 404, anyRoleUser ? "This email is not registered for the selected login page." : "Account not found. Please register first.");
+  }
+  if (!authUser.is_active) {
+    logLogin(req, null, false, "Failed Login", "Account inactive", email);
+    return sendAuthFailure(res, 403, "Account is inactive.");
+  }
+  if (!await verifyAuthPassword(password, authUser.password_hash)) {
+    logLogin(req, null, false, "Failed Login", "Incorrect password", email);
+    return sendAuthFailure(res, 401, "Invalid password.");
+  }
+  const user = mirrorAuthUserToLocal(authUser);
+
+  const loginRole = primaryRoleForRequestedLogin(user, requestedRole);
+  if (!loginRole) {
+    const reason = body.role ? "Requested login role not assigned" : "Role not assigned";
+    logLogin(req, user, false, "Failed Login", reason, email);
+    return sendAuthFailure(res, 403, body.role ? "This account is not registered for the selected login page." : "No role is assigned to your account");
+  }
+  await createAuthResponse(req, res, user, Boolean(body.rememberMe), "Login", "Login successful.", loginRole);
 }
 
 async function register(req, res) {
@@ -467,126 +555,76 @@ async function register(req, res) {
   const type = String(body.type || "candidate").toLowerCase();
   const email = String(body.email || "").trim().toLowerCase();
   const name = String(body.name || "").trim();
-  const password = String(body.password || "");
+  const password = normalizeSubmittedPassword(body.password);
   const phone = body.phone ? String(body.phone).trim() : null;
-  if (body.confirmPassword != null && password !== String(body.confirmPassword || "")) {
-    return sendError(res, 400, "Password and Confirm Password must match");
+  const confirmPassword = normalizeSubmittedPassword(body.confirmPassword);
+  const missing = [];
+  if (!name) missing.push("Name");
+  if (!email) missing.push("Email");
+  if (!phone) missing.push("Phone");
+  if (!password) missing.push("Password");
+  if (!confirmPassword) missing.push("Confirm Password");
+  if (missing.length) {
+    return sendAuthFailure(res, 400, `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} required.`);
   }
-  if (!name || !email || !validatePassword(password)) {
-    return sendError(res, 400, "Name, email, and a strong password are required. Password must include uppercase, lowercase, number, and special character.");
+  if (!validEmail(email)) {
+    return sendAuthFailure(res, 400, "Please enter a valid email address.");
   }
-  if (getUserByEmail(email)) return sendError(res, 409, "Email is already registered");
+  if (password !== confirmPassword) {
+    return sendAuthFailure(res, 400, "Password and Confirm Password must match");
+  }
+  if (!validatePassword(password)) {
+    return sendAuthFailure(res, 400, "Password must be at least 8 characters and include uppercase, lowercase, number, and special character.");
+  }
 
-  const roleByType = {
-    candidate: "candidate",
-    employer: "employer",
-    recruiter: "recruiter",
-    employee: "employee",
-    company: "company_admin",
-    admin: "super_admin",
-    talme_hr: "hr_manager"
-  };
-  const roleSlug = roleByType[type];
-  if (!roleSlug) return sendError(res, 400, "Unsupported registration type");
+  const roleSlug = REGISTRATION_ROLE_BY_TYPE[type];
+  if (!roleSlug) return sendAuthFailure(res, 400, "Unsupported registration type");
   if (type === "employee" && body.inviteCode !== employeeInviteCode) {
-    return sendError(res, 403, "Employee registration is invite only");
+    return sendAuthFailure(res, 403, "Employee registration is invite only");
   }
-
-  let company = null;
-  if (["employer", "recruiter", "employee", "company", "admin", "talme_hr"].includes(type)) {
-    company = createCompany(body.companyName || `${name}'s Company`);
+  if (!hasNeonAuth()) {
+    return sendAuthFailure(res, 500, "Authentication database is not configured.");
   }
-  const userId = createUser({ name, email, phone, password, roleSlug, companyId: company?.id, emailVerified: false });
-  const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-  if (type === "candidate") {
-    db.prepare(`
-      INSERT INTO candidate_accounts (user_id, headline, skills, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(userId, body.headline || "Open to opportunities", body.skills || "", now());
+  if (await findAuthUserByEmail(email, roleSlug)) {
+    return sendAuthFailure(res, 409, "This email is already registered for the selected login page.");
   }
-  if (company) {
-    db.prepare(`
-      INSERT INTO company_users (company_id, user_id, role_title, status, created_at)
-      VALUES (?, ?, ?, 'active', ?)
-    `).run(company.id, userId, roleSlug.replaceAll("_", " "), now());
-    if (["employee", "company_admin"].includes(roleSlug)) {
-      db.prepare(`
-        INSERT INTO employee_accounts (user_id, company_id, employee_code, designation, department, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(userId, company.id, `EMP-${userId}`, roleSlug.replaceAll("_", " "), body.department || "General", now());
-    }
-  }
-  const verificationToken = randomToken(32);
-  db.prepare(`
-    INSERT INTO email_verifications (user_id, token_hash, expires_at, created_at)
-    VALUES (?, ?, ?, ?)
-  `).run(userId, sha256(verificationToken), new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), now());
-  audit(req, userId, "Profile Updates", { registrationType: type }, "user", userId);
-  createAuthResponse(req, res, user, false, "Registration Login");
-}
-
-async function requestOtp(req, res) {
-  const body = await parseJsonBody(req);
-  const contact = String(body.contact || body.phone || body.email || "").trim();
-  const channel = contact.includes("@") ? "email" : "mobile";
-  const user = channel === "email" ? getUserByEmail(contact) : getUserByPhone(contact);
-  if (!contact) return sendError(res, 400, "Contact is required");
-  const code = String(Math.floor(100000 + Math.random() * 900000));
-  db.prepare(`
-    INSERT INTO otp_codes (user_id, contact, code_hash, channel, purpose, expires_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(user?.id || null, contact, sha256(code), channel, body.purpose || "login", new Date(Date.now() + 10 * 60 * 1000).toISOString(), now());
-  audit(req, user?.id || null, "Phone Verification", { channel, contact });
-  sendJson(res, 200, {
-    message: "OTP sent",
-    channel,
-    devCode: code
+  const authUser = await createAuthUser({ fullName: name, email, phone, password, role: roleSlug });
+  mirrorAuthUserToLocal(authUser);
+  sendJson(res, 201, {
+    success: true,
+    message: "Registration successful. Please login to continue."
   });
-}
-
-async function verifyOtp(req, res) {
-  const body = await parseJsonBody(req);
-  const contact = String(body.contact || body.phone || body.email || "").trim();
-  const code = String(body.code || "").trim();
-  const otp = db.prepare(`
-    SELECT * FROM otp_codes
-    WHERE contact = ? AND code_hash = ? AND used_at IS NULL AND expires_at > ?
-    ORDER BY id DESC
-  `).get(contact, sha256(code), now());
-  if (!otp) return sendError(res, 401, "Invalid or expired OTP");
-  db.prepare("UPDATE otp_codes SET used_at = ? WHERE id = ?").run(now(), otp.id);
-  if (!otp.user_id) return sendJson(res, 200, { verified: true, message: "OTP verified. Complete registration to create an account." });
-  const user = db.prepare("SELECT * FROM users WHERE id = ?").get(otp.user_id);
-  db.prepare("UPDATE users SET phone_verified = 1, updated_at = ? WHERE id = ?").run(now(), user.id);
-  createAuthResponse(req, res, user, Boolean(body.rememberMe), "OTP Login");
-}
-
-function passwordResetHash(email, value) {
-  return crypto
-    .createHmac("sha256", process.env.JWT_SECRET || "")
-    .update(`${String(email || "").trim().toLowerCase()}:${String(value || "")}`)
-    .digest("hex");
 }
 
 async function forgotPassword(req, res) {
   const body = await parseJsonBody(req);
   const email = String(body.email || "").trim().toLowerCase();
-  if (!email) return sendError(res, 400, "Email is required");
-  const localUser = getUserByEmail(email);
-  const authUser = await findAuthUserByEmail(email).catch(() => null);
-  if (!authUser && !localUser) return sendError(res, 404, "Email address is not registered");
-  if (!authUser) return sendError(res, 400, "Password reset email is available only for registered authentication accounts");
+  const roleSlug = roleSlugFromAuthBody(body);
+  if (!email) return sendAuthFailure(res, 400, "Email is required.");
+  if (!roleSlug) return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
+  if (!validEmail(email)) return sendAuthFailure(res, 400, "Please enter a valid email address.");
+  if (!hasNeonAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
+
+  const authUser = await findAuthUserByEmail(email, roleSlug);
+  if (!authUser) {
+    const anyRoleUser = await findAuthUserByEmail(email);
+    return sendAuthFailure(res, anyRoleUser ? 403 : 404, anyRoleUser ? "Email address is not registered for the selected login page." : "Email address is not registered.");
+  }
 
   const recentRequests = await countRecentPasswordOtpRequests(email, new Date(Date.now() - 15 * 60 * 1000).toISOString());
-  if (recentRequests >= 3) return sendError(res, 429, "Too many OTP requests. Please try again later.");
+  if (recentRequests >= 3) {
+    return sendAuthFailure(res, 429, "Too many OTP requests. Please try again later.");
+  }
 
   requireEmailConfig();
+
   const otp = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   await createPasswordResetOtp({
     authUserId: authUser.id,
     email,
-    otpHash: passwordResetHash(email, otp),
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    otpHash: passwordResetHash(email, otp, roleSlug),
+    expiresAt,
     requestIp: getIp(req),
     userAgent: req.headers["user-agent"] || ""
   });
@@ -598,87 +636,152 @@ async function forgotPassword(req, res) {
     throw error;
   }
 
-  audit(req, localUser?.id || null, "Password Reset", { stage: "otp_requested", email });
-  sendJson(res, 200, { message: "OTP has been sent to your registered email." });
+  audit(req, null, "Password Reset", { stage: "otp_requested", email, role: roleSlug });
+  sendJson(res, 200, {
+    success: true,
+    message: "OTP has been sent to your registered email."
+  });
 }
 
 async function verifyForgotPasswordOtp(req, res) {
   const body = await parseJsonBody(req);
   const email = String(body.email || "").trim().toLowerCase();
+  const roleSlug = roleSlugFromAuthBody(body);
   const otp = String(body.otp || "").trim();
-  if (!email) return sendError(res, 400, "Email is required");
-  if (!/^\d{6}$/.test(otp)) return sendError(res, 400, "Invalid OTP");
+  if (!email) return sendAuthFailure(res, 400, "Email is required.");
+  if (!roleSlug) return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
+  if (!validEmail(email)) return sendAuthFailure(res, 400, "Please enter a valid email address.");
+  if (!/^\d{6}$/.test(otp)) return sendAuthFailure(res, 400, "Invalid OTP.");
+  if (!hasNeonAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
 
   const resetToken = randomToken(32);
   const result = await verifyPasswordResetOtp({
     email,
-    otpHash: passwordResetHash(email, otp),
-    resetTokenHash: sha256(resetToken),
+    role: roleSlug,
+    otpHash: passwordResetHash(email, otp, roleSlug),
+    resetTokenHash: passwordResetHash(email, resetToken, roleSlug),
     resetExpiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
   });
-  if (!result.ok && result.reason === "expired") return sendError(res, 410, "OTP has expired. Please request a new OTP.");
-  if (!result.ok && result.reason === "too_many_attempts") return sendError(res, 429, "Too many invalid OTP attempts. Please request a new OTP.");
-  if (!result.ok) return sendError(res, 401, "Invalid OTP");
-
-  setResetCookie(res, resetToken);
-  sendJson(res, 200, { message: "OTP verified. Enter a new password." });
+  if (!result.ok && result.reason === "expired") {
+    return sendAuthFailure(res, 410, "OTP has expired. Please request a new OTP.");
+  }
+  if (!result.ok && result.reason === "too_many_attempts") {
+    return sendAuthFailure(res, 429, "Too many invalid OTP attempts. Please request a new OTP.");
+  }
+  if (!result.ok) return sendAuthFailure(res, 401, "Invalid OTP.");
+  res.setHeader("Set-Cookie", cookie("talme_reset", resetToken, {
+    httpOnly: true,
+    secure: Boolean(process.env.VERCEL),
+    sameSite: "Strict",
+    maxAge: 10 * 60
+  }));
+  sendJson(res, 200, {
+    success: true,
+    message: "OTP verified."
+  });
 }
 
 async function resetPassword(req, res) {
   const body = await parseJsonBody(req);
   const email = String(body.email || "").trim().toLowerCase();
-  const resetToken = String(body.token || parseCookies(req).talme_reset || "").trim();
-  if (!email || !resetToken) return sendError(res, 400, "Reset verification is required");
-  if (body.confirmPassword != null && body.password !== body.confirmPassword) {
-    return sendError(res, 400, "Password and Confirm Password must match");
+  const roleSlug = roleSlugFromAuthBody(body);
+  const resetToken = String(body.resetToken || body.token || parseCookies(req).talme_reset || "").trim();
+  const password = normalizeSubmittedPassword(body.password);
+  const confirmPassword = normalizeSubmittedPassword(body.confirmPassword);
+  if (!email) return sendAuthFailure(res, 400, "Email is required.");
+  if (!roleSlug) return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
+  if (!validEmail(email)) return sendAuthFailure(res, 400, "Please enter a valid email address.");
+  if (!resetToken) return sendAuthFailure(res, 400, "Reset verification is required.");
+  if (password !== confirmPassword) return sendAuthFailure(res, 400, "Password and Confirm Password must match");
+  if (!validatePassword(password)) {
+    return sendAuthFailure(res, 400, "Password must be at least 8 characters and include uppercase, lowercase, number, and special character.");
   }
-  if (!validatePassword(body.password)) return sendError(res, 400, "Password must be at least 8 characters with uppercase, lowercase, number, and special character");
+  if (!hasNeonAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
 
-  const result = await resetAuthPasswordWithToken({ email, resetTokenHash: sha256(resetToken), password: body.password }).catch(() => ({ ok: false }));
+  const result = await resetAuthPasswordWithToken({
+    email,
+    role: roleSlug,
+    resetTokenHash: passwordResetHash(email, resetToken, roleSlug),
+    password
+  });
+  if (!result.ok && result.reason === "expired") {
+    clearResetCookie(res);
+    return sendAuthFailure(res, 410, "OTP has expired. Please request a new OTP.");
+  }
   if (!result.ok) {
     clearResetCookie(res);
-    return sendError(res, 401, "Invalid or expired reset token");
+    return sendAuthFailure(res, 401, "Invalid OTP.");
   }
 
   const localUser = getUserByEmail(email);
   if (localUser) {
-    db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(body.password), now(), localUser.id);
-    db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ?").run(now(), localUser.id);
+    db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(password), now(), localUser.id);
+    db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(now(), localUser.id);
     audit(req, localUser.id, "Password Reset", { stage: "completed" });
   } else {
     audit(req, null, "Password Reset", { stage: "completed", email });
   }
+  await revokeAuthSessionsByEmail(email, roleSlug).catch(() => {});
   clearResetCookie(res);
-  sendJson(res, 200, { message: "Password reset successful. You can now login with your new password." });
+  sendJson(res, 200, {
+    success: true,
+    message: "Password reset successfully. You can now login with your new password."
+  });
 }
 
 async function refresh(req, res) {
   const refreshToken = parseCookies(req).talme_refresh;
   if (!refreshToken) return sendError(res, 401, "Refresh token missing");
+  const refreshHash = sha256(refreshToken);
   const session = db.prepare(`
     SELECT * FROM sessions WHERE refresh_token_hash = ? AND revoked_at IS NULL AND expires_at > ?
-  `).get(sha256(refreshToken), now());
-  if (!session) return sendError(res, 401, "Refresh token invalid");
-  const user = db.prepare("SELECT * FROM users WHERE id = ? AND status = 'active'").get(session.user_id);
-  if (!user) return sendError(res, 401, "User inactive");
-  const seenAt = now();
-  db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(seenAt, session.id);
-  if (session.device_id) {
-    db.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").run(seenAt, session.device_id);
+  `).get(refreshHash, now());
+  let user = session ? db.prepare("SELECT * FROM users WHERE id = ? AND status = 'active'").get(session.user_id) : null;
+  let csrfToken = session?.csrf_token || "";
+  const persistentSession = await findAuthSessionByRefreshHash(refreshHash).catch(() => null);
+  let authSessionKey = persistentSession?.session_key || null;
+  if (session && user) {
+    const seenAt = now();
+    db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(seenAt, session.id);
+    if (session.device_id) {
+      db.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").run(seenAt, session.device_id);
+    }
+    if (persistentSession?.csrf_token) csrfToken = persistentSession.csrf_token;
+    if (persistentSession?.session_key) await touchAuthSession(persistentSession.session_key).catch(() => {});
+  } else {
+    const authSession = persistentSession;
+    if (!authSession?.is_active) return sendError(res, 401, "Refresh token invalid");
+    await touchAuthSession(authSession.session_key).catch(() => {});
+    user = mirrorAuthUserToLocal({
+      full_name: authSession.full_name,
+      email: authSession.email,
+      phone: authSession.phone,
+      role: authSession.role,
+      is_active: authSession.is_active
+    });
+    csrfToken = authSession.csrf_token;
+    authSessionKey = authSession.session_key;
   }
   const accessToken = signJwt({
     sub: user.id,
-    sid: session.id,
+    sid: session?.id || 0,
+    authSid: authSessionKey || undefined,
+    email: user.email,
     roles: rolesForUser(user.id).map(role => role.slug),
-    permissions: permissionsForUser(user.id)
+    permissions: permissionsForUser(user.id),
+    csrf: csrfToken
   });
-  sendJson(res, 200, { accessToken, csrfToken: session.csrf_token, user: sanitizeUser(user) });
+  sendJson(res, 200, { accessToken, csrfToken, user: sanitizeUser(user) });
 }
 
 async function logout(req, res) {
   const context = await requireAuth(req, res);
   if (!context) return;
-  db.prepare("UPDATE sessions SET revoked_at = ? WHERE id = ?").run(now(), context.session.id);
+  if (context.session?.id) {
+    db.prepare("UPDATE sessions SET revoked_at = ? WHERE id = ?").run(now(), context.session.id);
+  }
+  const authSessionKey = context.session?.authSessionKey || context.payload?.authSid;
+  if (authSessionKey) await revokeAuthSessionByKey(authSessionKey).catch(() => {});
   clearRefreshCookie(res);
   logLogin(req, context.user, true, "Logout");
   audit(req, context.user.id, "Logout");
@@ -695,11 +798,15 @@ async function tabCloseLogout(req, res) {
     session = db.prepare(`
       SELECT * FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL
     `).get(payload.sid, payload.sub);
+    if (payload.authSid) {
+      await revokeAuthSessionByKey(payload.authSid).catch(() => {});
+    }
   }
   if (!session && refreshToken) {
     session = db.prepare(`
       SELECT * FROM sessions WHERE refresh_token_hash = ? AND revoked_at IS NULL
     `).get(sha256(refreshToken));
+    await revokeAuthSessionByRefreshHash(sha256(refreshToken)).catch(() => {});
   }
   if (!session) return sendJson(res, 200, { message: "No active session" });
 
@@ -721,6 +828,7 @@ async function logoutAll(req, res) {
   const context = await requireAuth(req, res, "auth.logout_all");
   if (!context) return;
   db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(now(), context.user.id);
+  if (context.user.email) await revokeAuthSessionsByEmail(context.user.email).catch(() => {});
   clearRefreshCookie(res);
   audit(req, context.user.id, "Logout from All Devices");
   sendJson(res, 200, { message: "Logged out from all devices" });
@@ -908,7 +1016,9 @@ async function hrEmployees(req, res) {
   const context = await requireAuth(req, res, "employees.manage");
   if (!context) return;
   const rows = db.prepare(`
-    SELECT u.id, ea.employee_code, u.name, u.email, u.phone, ea.designation, ea.department,
+    SELECT u.id, ea.employee_code, u.name,
+           CASE WHEN lower(u.email) LIKE 'local-import-%@talme.local' THEN '' ELSE u.email END AS email,
+           u.phone, ea.designation, ea.department,
            ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
            ea.cv_file_name, ea.cv_stored_name
     FROM employee_accounts ea
@@ -918,7 +1028,7 @@ async function hrEmployees(req, res) {
     WHERE r.slug = 'employee'
     ORDER BY u.name
   `).all();
-  sendJson(res, 200, { items: rows });
+  sendJson(res, 200, { items: await attachEmployeeAudits(rows) });
 }
 
 async function importedHrEmployees(req, res) {
@@ -931,8 +1041,12 @@ async function importedHrEmployees(req, res) {
   }
 
   const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const items = (Array.isArray(payload.items) ? payload.items : []).map(item => ({
+    ...item,
+    source: item.source || "imported-employees.json"
+  }));
   sendJson(res, 200, {
-    items: Array.isArray(payload.items) ? payload.items : [],
+    items: await attachEmployeeAudits(items),
     summary: {
       source: payload.source || "imported-employees.json",
       generatedAt: payload.generatedAt || null,
@@ -963,7 +1077,7 @@ async function createEmployee(req, res) {
   const name = record.fullName;
   const email = record.email;
   const phone = record.phone;
-  const password = "Password123!";
+  const password = randomToken(24);
   const employeeCode = String(body.employeeCode || "").trim();
   const designation = record.currentDesignation || "Employee";
   const department = record.currentCompany || record.location || "General";
@@ -1043,6 +1157,18 @@ async function createEmployee(req, res) {
   );
   }
 
+  const savedEmployee = db.prepare(`
+    SELECT u.id, ea.employee_code, u.name,
+           CASE WHEN lower(u.email) LIKE 'local-import-%@talme.local' THEN '' ELSE u.email END AS email,
+           u.phone, ea.designation, ea.department,
+           ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
+           ea.cv_file_name, ea.cv_stored_name
+    FROM employee_accounts ea
+    JOIN users u ON u.id = ea.user_id
+    WHERE u.id = ?
+  `).get(userId);
+  const auditedEmployee = await writeEmployeeAudit(savedEmployee, context, existingEmployee ? "edited" : "created");
+
   audit(req, context.user.id, "Employee Add", {
     userId,
     email,
@@ -1051,19 +1177,8 @@ async function createEmployee(req, res) {
   }, "user", userId);
   sendJson(res, existingUser || existingEmployee ? 200 : 201, {
     success: true,
-    message: existingUser || existingEmployee ? "Employee updated successfully" : "Employee added successfully",
-    employee: {
-      name,
-      email,
-      phone,
-      employeeCode: employeeCodeValue,
-      location: record.location,
-      keywords: record.keywords,
-      experience: record.experience,
-      currentCompany: record.currentCompany,
-      currentDesignation: record.currentDesignation,
-      cvFileName
-    }
+    message: existingEmployee ? "Employee updated successfully" : "Employee added successfully",
+    employee: employeeResponse(auditedEmployee)
   });
 }
 
@@ -1223,6 +1338,13 @@ function validEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+function passwordResetHash(email, value, role = "") {
+  return crypto
+    .createHmac("sha256", process.env.JWT_SECRET || "")
+    .update(`${String(email || "").trim().toLowerCase()}:${String(role || "").trim()}:${String(value || "")}`)
+    .digest("hex");
+}
+
 function normalizeCandidateRecord(raw) {
   const record = {
     fullName: trimCell(raw.fullName),
@@ -1344,6 +1466,46 @@ function readImportedEmployeesPayload() {
   return payload;
 }
 
+function publicEmployeeRows() {
+  return db.prepare(`
+    SELECT u.id, ea.employee_code, u.name,
+           CASE WHEN lower(u.email) LIKE 'local-import-%@talme.local' THEN '' ELSE u.email END AS email,
+           u.phone
+    FROM employee_accounts ea
+    JOIN users u ON u.id = ea.user_id
+    JOIN user_roles ur ON ur.user_id = u.id
+    JOIN roles r ON r.id = ur.role_id
+    WHERE r.slug = 'employee'
+  `).all();
+}
+
+function mergedEmployeeProfileCount(dbItems, importedItems) {
+  const seen = new Set();
+  let count = 0;
+  for (const employee of [...dbItems, ...importedItems]) {
+    const key = `${String(employee.email || "").toLowerCase()}|${String(employee.phone || "")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    count += 1;
+  }
+  return count;
+}
+
+async function publicProfileCount(req, res) {
+  const payload = readImportedEmployeesPayload();
+  const dbItems = publicEmployeeRows();
+  const totalProfiles = mergedEmployeeProfileCount(dbItems, payload.items);
+  sendJson(res, 200, {
+    success: true,
+    totalProfiles,
+    profiles: totalProfiles,
+    databaseProfiles: dbItems.length,
+    importedProfiles: payload.items.length,
+    source: "employee_accounts + imported-employees.json",
+    generatedAt: payload.generatedAt || null
+  });
+}
+
 function writeImportedEmployeesPayload(payload) {
   fs.writeFileSync(importedEmployeesFilePath(), `${JSON.stringify(payload, null, 2)}\n`);
 }
@@ -1377,6 +1539,70 @@ function normalizeEmployeeUpdate(raw) {
   return record;
 }
 
+function employeeAuditRecordKey(record) {
+  if (record?.source === "imported-employees.json" || record?.source === "imported") {
+    const key = record.id || record.employee_code || record.email || record.phone || record.rowNumber;
+    return `imported:${String(key || "").toLowerCase()}`;
+  }
+  if (record?.id != null) return `local-user:${record.id}`;
+  if (record?.user_id != null) return `local-user:${record.user_id}`;
+  const key = record?.employee_code || record?.email || record?.phone;
+  return `employee:${String(key || "").toLowerCase()}`;
+}
+
+function employeeAuditIdentity(record) {
+  return {
+    recordKey: employeeAuditRecordKey(record),
+    employeeUserId: record?.id ?? record?.user_id ?? null,
+    employeeEmail: record?.email || null,
+    employeePhone: record?.phone || null
+  };
+}
+
+async function employeeAuditEditor(context) {
+  const authRole = context.safeUser?.primaryRole || context.safeUser?.roles?.[0]?.slug || null;
+  const authUser = context.user?.email ? await findAuthUserByEmail(context.user.email, authRole).catch(() => null) : null;
+  return {
+    editorAuthUserId: authUser?.id || null,
+    editorName: context.user?.name || authUser?.full_name || "Unknown user",
+    editorEmail: context.user?.email || authUser?.email || null
+  };
+}
+
+function attachEmployeeAudit(record, audit) {
+  if (!record) return record;
+  const action = audit?.action || null;
+  return {
+    ...record,
+    audit_action: action,
+    audit_user_name: action === "created" ? audit?.createdByName || null : audit?.lastEditedByName || null,
+    audit_user_email: action === "created" ? audit?.createdByEmail || null : audit?.lastEditedByEmail || null,
+    audit_at: action === "created" ? audit?.createdAt || null : audit?.lastEditedAt || null,
+    created_by_name: audit?.createdByName || null,
+    created_by_email: audit?.createdByEmail || null,
+    created_at_audit: audit?.createdAt || null,
+    last_edited_by_name: audit?.lastEditedByName || null,
+    last_edited_by_email: audit?.lastEditedByEmail || null,
+    last_edited_at: audit?.lastEditedAt || null
+  };
+}
+
+async function attachEmployeeAudits(records) {
+  const items = Array.isArray(records) ? records : [];
+  const audits = await getEmployeeRecordAudits(items.map(employeeAuditRecordKey));
+  return items.map(record => attachEmployeeAudit(record, audits.get(employeeAuditRecordKey(record))));
+}
+
+async function writeEmployeeAudit(record, context, action) {
+  const identity = employeeAuditIdentity(record);
+  const audit = await upsertEmployeeRecordAudit({
+    ...identity,
+    ...await employeeAuditEditor(context),
+    action
+  });
+  return attachEmployeeAudit(record, audit);
+}
+
 function employeeResponse(record) {
   return {
     id: record.id,
@@ -1394,7 +1620,17 @@ function employeeResponse(record) {
     cv_file_name: record.cv_file_name,
     cv_stored_name: record.cv_stored_name,
     source: record.source,
-    rowNumber: record.rowNumber
+    rowNumber: record.rowNumber,
+    audit_action: record.audit_action,
+    audit_user_name: record.audit_user_name,
+    audit_user_email: record.audit_user_email,
+    audit_at: record.audit_at,
+    created_by_name: record.created_by_name,
+    created_by_email: record.created_by_email,
+    created_at_audit: record.created_at_audit,
+    last_edited_by_name: record.last_edited_by_name,
+    last_edited_by_email: record.last_edited_by_email,
+    last_edited_at: record.last_edited_at
   };
 }
 
@@ -1438,8 +1674,9 @@ async function updateHrEmployee(req, res, employeeId) {
     if (cv.cvStoredName && existing.cv_stored_name && existing.cv_stored_name !== cv.cvStoredName) {
       removeStoredCv(existing.cv_stored_name);
     }
-    const updated = {
+    let updated = {
       ...existing,
+      source: existing.source || "imported-employees.json",
       employee_code: data.employeeCode || existing.employee_code,
       name: data.name,
       email: data.email,
@@ -1455,6 +1692,7 @@ async function updateHrEmployee(req, res, employeeId) {
       cv_stored_name: cv.cvStoredName || existing.cv_stored_name || null,
       updatedAt: now()
     };
+    updated = await writeEmployeeAudit(updated, context, "edited");
     importedPayload.items[importedIndex] = updated;
     importedPayload.generatedAt = now();
     writeImportedEmployeesPayload(importedPayload);
@@ -1517,7 +1755,7 @@ async function updateHrEmployee(req, res, employeeId) {
     employee.id
   );
 
-  const updated = db.prepare(`
+  let updated = db.prepare(`
     SELECT u.id, ea.employee_code, u.name, u.email, u.phone, ea.designation, ea.department,
            ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
            ea.cv_file_name, ea.cv_stored_name
@@ -1525,6 +1763,7 @@ async function updateHrEmployee(req, res, employeeId) {
     JOIN users u ON u.id = ea.user_id
     WHERE u.id = ?
   `).get(employee.id);
+  updated = await writeEmployeeAudit(updated, context, "edited");
   audit(req, context.user.id, "Employee Update", { employeeId: employee.id, imported: false, cvFileName: updated.cv_file_name }, "user", employee.id);
   sendJson(res, 200, {
     success: true,
@@ -1881,7 +2120,7 @@ async function importEmployeesPreview(req, res) {
   });
 }
 
-function upsertEmployeeAccountFromImport(record, context) {
+async function upsertEmployeeAccountFromImport(record, context) {
   const data = record.data;
   const existingUser = getUserByEmail(data.email);
   const phoneUser = data.phone ? getUserByPhone(data.phone) : null;
@@ -1890,7 +2129,7 @@ function upsertEmployeeAccountFromImport(record, context) {
   }
 
   const companyId = companyIdForUser(context.user.id);
-  const password = "Password123!";
+  const password = randomToken(24);
   const userId = existingUser
     ? existingUser.id
     : createUser({ name: data.fullName, email: data.email, phone: data.phone, password, roleSlug: "employee", companyId, emailVerified: true });
@@ -1933,6 +2172,15 @@ function upsertEmployeeAccountFromImport(record, context) {
       designation,
       userId
     );
+    const updated = db.prepare(`
+      SELECT u.id, ea.employee_code, u.name, u.email, u.phone, ea.designation, ea.department,
+             ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
+             ea.cv_file_name, ea.cv_stored_name
+      FROM employee_accounts ea
+      JOIN users u ON u.id = ea.user_id
+      WHERE u.id = ?
+    `).get(userId);
+    await writeEmployeeAudit(updated, context, "edited");
     return { updated: true, userId };
   }
 
@@ -1954,6 +2202,15 @@ function upsertEmployeeAccountFromImport(record, context) {
     designation,
     now()
   );
+  const created = db.prepare(`
+    SELECT u.id, ea.employee_code, u.name, u.email, u.phone, ea.designation, ea.department,
+           ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
+           ea.cv_file_name, ea.cv_stored_name
+    FROM employee_accounts ea
+    JOIN users u ON u.id = ea.user_id
+    WHERE u.id = ?
+  `).get(userId);
+  await writeEmployeeAudit(created, context, "created");
   return { created: true, userId };
 }
 
@@ -1980,7 +2237,7 @@ async function importEmployeesCommit(req, res) {
     try {
       for (const record of batch) {
         try {
-          const result = upsertEmployeeAccountFromImport(record, context);
+          const result = await upsertEmployeeAccountFromImport(record, context);
           if (result.created) summary.created += 1;
           if (result.updated) summary.updated += 1;
           if (result.failed) {
@@ -2256,10 +2513,7 @@ function serveStatic(req, res, pathname) {
 const routes = {
   "GET /api/health": healthCheck,
   "POST /api/auth/login": login,
-  "POST /api/auth/social": socialLogin,
   "POST /api/auth/register": register,
-  "POST /api/auth/otp/request": requestOtp,
-  "POST /api/auth/otp/verify": verifyOtp,
   "POST /api/auth/forgot-password": forgotPassword,
   "POST /api/auth/forgot-password/verify": verifyForgotPasswordOtp,
   "POST /api/auth/reset-password": resetPassword,
@@ -2267,6 +2521,7 @@ const routes = {
   "POST /api/auth/logout": logout,
   "POST /api/auth/tab-close": tabCloseLogout,
   "POST /api/auth/logout-all": logoutAll,
+  "GET /api/public/profile-count": publicProfileCount,
   "GET /api/me": me,
   "GET /api/auth/login-activity": loginActivity,
   "GET /api/auth/devices": deviceHistory,
@@ -2291,10 +2546,6 @@ async function requestHandler(req, res) {
   applySecurityHeaders(res);
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const routeKey = `${req.method} ${url.pathname}`;
-  console.log("[iplant-api-trace] requestHandler received request", {
-    routeKey,
-    url: req.url
-  });
   if (!enforceRateLimit(req, res)) return;
   try {
     if (routes[routeKey]) return await routes[routeKey](req, res);
@@ -2314,8 +2565,8 @@ async function requestHandler(req, res) {
     return serveStatic(req, res, url.pathname);
   } catch (error) {
     const statusCode = error.statusCode || 500;
-    console.error(error);
-    sendError(res, statusCode, statusCode === 500 ? "Internal server error" : error.message);
+    if (statusCode >= 500 && !error.expose) console.error(error);
+    sendError(res, statusCode, statusCode === 500 && !error.expose ? "Internal server error" : error.message);
   }
 }
 

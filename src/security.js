@@ -62,14 +62,21 @@ function signJwt(payload, expiresInSeconds = accessTokenTtlSeconds) {
 }
 
 function verifyJwt(token) {
-  const [encodedHeader, encodedPayload, signature] = String(token || "").split(".");
-  if (!encodedHeader || !encodedPayload || !signature) return null;
-  const unsigned = `${encodedHeader}.${encodedPayload}`;
-  const expected = crypto.createHmac("sha256", jwtSecret).update(unsigned).digest("base64url");
-  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
-  const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
-  if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
-  return payload;
+  try {
+    const [encodedHeader, encodedPayload, signature] = String(token || "").split(".");
+    if (!encodedHeader || !encodedPayload || !signature) return null;
+    const unsigned = `${encodedHeader}.${encodedPayload}`;
+    const expected = crypto.createHmac("sha256", jwtSecret).update(unsigned).digest("base64url");
+    const signatureBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expected);
+    if (signatureBuffer.length !== expectedBuffer.length) return null;
+    if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) return null;
+    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
 }
 
 function parseCookies(req) {

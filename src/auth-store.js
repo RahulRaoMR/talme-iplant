@@ -33,8 +33,32 @@ async function ensureAuthSchema() {
         is_active BOOLEAN NOT NULL DEFAULT TRUE
       );
 
-      CREATE UNIQUE INDEX IF NOT EXISTS auth_users_email_lower_unique
-        ON auth_users (LOWER(email));
+      DROP INDEX IF EXISTS auth_users_email_lower_unique;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS auth_users_email_role_lower_unique
+        ON auth_users (LOWER(email), role);
+
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        id BIGSERIAL PRIMARY KEY,
+        session_key TEXT NOT NULL UNIQUE,
+        email TEXT NOT NULL,
+        role TEXT,
+        refresh_token_hash TEXT NOT NULL UNIQUE,
+        csrf_token TEXT NOT NULL,
+        remember_me BOOLEAN NOT NULL DEFAULT FALSE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        revoked_at TIMESTAMPTZ,
+        ip_address TEXT,
+        user_agent TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS auth_sessions_email_active_idx
+        ON auth_sessions (LOWER(email), revoked_at, expires_at);
+
+      ALTER TABLE auth_sessions
+        ADD COLUMN IF NOT EXISTS role TEXT;
 
       CREATE TABLE IF NOT EXISTS auth_password_otps (
         id BIGSERIAL PRIMARY KEY,
@@ -89,15 +113,22 @@ function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
 
-async function findAuthUserByEmail(email) {
+function normalizeRole(role) {
+  return String(role || "").trim();
+}
+
+async function findAuthUserByEmail(email, role = null) {
   await ensureAuthSchema();
   if (!pool) return null;
+  const normalizedRole = normalizeRole(role);
   const result = await pool.query(
     `SELECT id, full_name, email, phone, password_hash, role, created_at, updated_at, is_active
      FROM auth_users
      WHERE LOWER(email) = LOWER($1)
+       AND ($2::text IS NULL OR role = $2)
+     ORDER BY id
      LIMIT 1`,
-    [normalizeEmail(email)]
+    [normalizeEmail(email), normalizedRole || null]
   );
   return result.rows[0] || null;
 }
@@ -119,18 +150,117 @@ async function verifyAuthPassword(password, passwordHash) {
   return bcrypt.compare(String(password || ""), String(passwordHash || ""));
 }
 
-async function updateAuthUserPassword(email, password) {
+async function updateAuthUserPassword(email, password, role = null) {
   await ensureAuthSchema();
   if (!pool) throw new Error("DATABASE_URL is required for production authentication");
   const passwordHash = await bcrypt.hash(password, 12);
+  const normalizedRole = normalizeRole(role);
   const result = await pool.query(
     `UPDATE auth_users
      SET password_hash = $2, updated_at = NOW()
      WHERE LOWER(email) = LOWER($1)
+       AND ($3::text IS NULL OR role = $3)
      RETURNING id, full_name, email, phone, role, created_at, updated_at, is_active`,
-    [normalizeEmail(email), passwordHash]
+    [normalizeEmail(email), passwordHash, normalizedRole || null]
   );
   return result.rows[0] || null;
+}
+
+async function createAuthSession({ sessionKey, email, role, refreshTokenHash, csrfToken, rememberMe, expiresAt, ipAddress, userAgent }) {
+  await ensureAuthSchema();
+  if (!pool) throw new Error("DATABASE_URL is required for production authentication");
+  const normalizedRole = normalizeRole(role);
+  await pool.query(
+    `UPDATE auth_sessions
+     SET revoked_at = NOW()
+     WHERE LOWER(email) = LOWER($1)
+       AND ($2::text IS NULL OR role = $2)
+       AND revoked_at IS NULL`,
+    [normalizeEmail(email), normalizedRole || null]
+  );
+  const result = await pool.query(
+    `INSERT INTO auth_sessions
+       (session_key, email, role, refresh_token_hash, csrf_token, remember_me, expires_at, last_seen_at, ip_address, user_agent)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9)
+     RETURNING id, session_key, email, role, csrf_token, remember_me, expires_at, last_seen_at, revoked_at`,
+    [sessionKey, normalizeEmail(email), normalizedRole || null, refreshTokenHash, csrfToken, Boolean(rememberMe), expiresAt, ipAddress || null, userAgent || null]
+  );
+  return result.rows[0];
+}
+
+async function findAuthSessionByKey(sessionKey) {
+  await ensureAuthSchema();
+  if (!pool) return null;
+  const result = await pool.query(
+    `SELECT s.*, u.id AS auth_user_id, u.full_name, u.phone, u.role, u.is_active
+     FROM auth_sessions s
+     JOIN auth_users u ON LOWER(u.email) = LOWER(s.email)
+      AND (s.role IS NULL OR u.role = s.role)
+     WHERE s.session_key = $1 AND s.revoked_at IS NULL AND s.expires_at > NOW()
+     LIMIT 1`,
+    [String(sessionKey || "")]
+  );
+  return result.rows[0] || null;
+}
+
+async function findAuthSessionByRefreshHash(refreshTokenHash) {
+  await ensureAuthSchema();
+  if (!pool) return null;
+  const result = await pool.query(
+    `SELECT s.*, u.id AS auth_user_id, u.full_name, u.phone, u.role, u.is_active
+     FROM auth_sessions s
+     JOIN auth_users u ON LOWER(u.email) = LOWER(s.email)
+      AND (s.role IS NULL OR u.role = s.role)
+     WHERE s.refresh_token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > NOW()
+     LIMIT 1`,
+    [String(refreshTokenHash || "")]
+  );
+  return result.rows[0] || null;
+}
+
+async function touchAuthSession(sessionKey) {
+  await ensureAuthSchema();
+  if (!pool) return 0;
+  const result = await pool.query(
+    `UPDATE auth_sessions SET last_seen_at = NOW() WHERE session_key = $1 AND revoked_at IS NULL`,
+    [String(sessionKey || "")]
+  );
+  return result.rowCount;
+}
+
+async function revokeAuthSessionByKey(sessionKey) {
+  await ensureAuthSchema();
+  if (!pool) return 0;
+  const result = await pool.query(
+    `UPDATE auth_sessions SET revoked_at = NOW() WHERE session_key = $1 AND revoked_at IS NULL`,
+    [String(sessionKey || "")]
+  );
+  return result.rowCount;
+}
+
+async function revokeAuthSessionByRefreshHash(refreshTokenHash) {
+  await ensureAuthSchema();
+  if (!pool) return 0;
+  const result = await pool.query(
+    `UPDATE auth_sessions SET revoked_at = NOW() WHERE refresh_token_hash = $1 AND revoked_at IS NULL`,
+    [String(refreshTokenHash || "")]
+  );
+  return result.rowCount;
+}
+
+async function revokeAuthSessionsByEmail(email, role = null) {
+  await ensureAuthSchema();
+  if (!pool) return 0;
+  const normalizedRole = normalizeRole(role);
+  const result = await pool.query(
+    `UPDATE auth_sessions
+     SET revoked_at = NOW()
+     WHERE LOWER(email) = LOWER($1)
+       AND ($2::text IS NULL OR role = $2)
+       AND revoked_at IS NULL`,
+    [normalizeEmail(email), normalizedRole || null]
+  );
+  return result.rowCount;
 }
 
 async function countRecentPasswordOtpRequests(email, since) {
@@ -175,9 +305,10 @@ async function invalidatePasswordResetOtpsByEmail(email) {
   return result.rowCount;
 }
 
-async function verifyPasswordResetOtp({ email, otpHash, resetTokenHash, resetExpiresAt }) {
+async function verifyPasswordResetOtp({ email, role = null, otpHash, resetTokenHash, resetExpiresAt }) {
   await ensureAuthSchema();
   if (!pool) throw new Error("DATABASE_URL is required for production authentication");
+  const normalizedRole = normalizeRole(role);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -186,12 +317,13 @@ async function verifyPasswordResetOtp({ email, otpHash, resetTokenHash, resetExp
        FROM auth_password_otps o
        JOIN auth_users u ON u.id = o.auth_user_id
        WHERE LOWER(o.email) = LOWER($1)
+         AND ($2::text IS NULL OR u.role = $2)
          AND o.used_at IS NULL
          AND o.verified_at IS NULL
        ORDER BY o.created_at DESC
        LIMIT 1
        FOR UPDATE`,
-      [normalizeEmail(email)]
+      [normalizeEmail(email), normalizedRole || null]
     );
     const otp = result.rows[0];
     if (!otp) {
@@ -239,10 +371,11 @@ async function verifyPasswordResetOtp({ email, otpHash, resetTokenHash, resetExp
   }
 }
 
-async function resetAuthPasswordWithToken({ email, resetTokenHash, password }) {
+async function resetAuthPasswordWithToken({ email, role = null, resetTokenHash, password }) {
   await ensureAuthSchema();
   if (!pool) throw new Error("DATABASE_URL is required for production authentication");
   const passwordHash = await bcrypt.hash(password, 12);
+  const normalizedRole = normalizeRole(role);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -251,13 +384,14 @@ async function resetAuthPasswordWithToken({ email, resetTokenHash, password }) {
        FROM auth_password_otps o
        JOIN auth_users u ON u.id = o.auth_user_id
        WHERE LOWER(o.email) = LOWER($1)
-         AND o.reset_token_hash = $2
+         AND ($2::text IS NULL OR u.role = $2)
+         AND o.reset_token_hash = $3
          AND o.verified_at IS NOT NULL
          AND o.used_at IS NULL
        ORDER BY o.created_at DESC
        LIMIT 1
        FOR UPDATE`,
-      [normalizeEmail(email), resetTokenHash]
+      [normalizeEmail(email), normalizedRole || null, resetTokenHash]
     );
     const otp = otpResult.rows[0];
     if (!otp) {
@@ -361,12 +495,15 @@ async function getEmployeeRecordAudits(recordKeys) {
   return new Map(result.rows.map(row => [row.record_key, auditRowPayload(row)]));
 }
 
-async function deleteAuthUserByEmail(email) {
+async function deleteAuthUserByEmail(email, role = null) {
   await ensureAuthSchema();
   if (!pool) return 0;
+  const normalizedRole = normalizeRole(role);
   const result = await pool.query(
-    `DELETE FROM auth_users WHERE LOWER(email) = LOWER($1)`,
-    [normalizeEmail(email)]
+    `DELETE FROM auth_users
+     WHERE LOWER(email) = LOWER($1)
+       AND ($2::text IS NULL OR role = $2)`,
+    [normalizeEmail(email), normalizedRole || null]
   );
   return result.rowCount;
 }
@@ -382,6 +519,13 @@ module.exports = {
   createAuthUser,
   verifyAuthPassword,
   updateAuthUserPassword,
+  createAuthSession,
+  findAuthSessionByKey,
+  findAuthSessionByRefreshHash,
+  touchAuthSession,
+  revokeAuthSessionByKey,
+  revokeAuthSessionByRefreshHash,
+  revokeAuthSessionsByEmail,
   countRecentPasswordOtpRequests,
   createPasswordResetOtp,
   invalidatePasswordResetOtpsByEmail,

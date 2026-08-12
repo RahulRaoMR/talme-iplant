@@ -4,6 +4,7 @@ const state = {
   user: null,
   authMode: "login",
   selectedRole: "super_admin",
+  forgotEmail: "",
   theme: localStorage.getItem("talme_theme") || "light",
   candidateImportId: "",
   hrEmployees: [],
@@ -12,10 +13,9 @@ const state = {
   hrShowDuplicates: false,
   expandedEmployeeSkills: new Set(),
   hrImportConfirmation: "",
+  profileCount: Number(localStorage.getItem("talme_profile_count")) || 1501,
   skipUnloadLogout: false,
-  unloadLogoutSent: false,
-  passwordResetEmail: "",
-  passwordResetOtp: ""
+  unloadLogoutSent: false
 };
 
 localStorage.removeItem("talme_access");
@@ -57,7 +57,7 @@ const dashboardTitles = {
   "/admin/dashboard": "Super Admin Console"
 };
 
-const demoCandidateContact = {
+const candidateContact = {
   name: "Vayalpadu Nirupa",
   email: "nirupa@gmail.com",
   phone: "9876543210",
@@ -66,6 +66,8 @@ const demoCandidateContact = {
 
 let securityMonitorTimer = null;
 let importCommitProgressTimer = null;
+let hrEmployeesLiveTimer = null;
+let hrEmployeesLiveLoading = false;
 
 document.body.classList.toggle("dark", state.theme === "dark");
 
@@ -200,7 +202,7 @@ async function api(path, options = {}) {
     });
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw Object.assign(new Error(payload.error || "Request failed"), { status: response.status, payload });
+  if (!response.ok) throw Object.assign(new Error(payload.message || payload.error || "Request failed"), { status: response.status, payload });
   return payload;
 }
 
@@ -228,7 +230,7 @@ async function apiUpload(path, formData, options = {}) {
     });
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw Object.assign(new Error(payload.error || "Upload failed"), { status: response.status, payload });
+  if (!response.ok) throw Object.assign(new Error(payload.message || payload.error || "Upload failed"), { status: response.status, payload });
   return payload;
 }
 
@@ -258,15 +260,15 @@ function escapeHtml(value) {
 }
 
 function candidatePhoneHref() {
-  return `+${demoCandidateContact.countryCode}${demoCandidateContact.phone}`;
+  return `+${candidateContact.countryCode}${candidateContact.phone}`;
 }
 
 function candidateWhatsAppHref() {
-  return `https://wa.me/${demoCandidateContact.countryCode}${demoCandidateContact.phone}`;
+  return `https://wa.me/${candidateContact.countryCode}${candidateContact.phone}`;
 }
 
 function revealCandidatePhone(button) {
-  const phone = demoCandidateContact.phone;
+  const phone = candidateContact.phone;
   document.querySelectorAll("[data-candidate-phone]").forEach(node => {
     node.hidden = false;
     node.textContent = phone;
@@ -292,7 +294,7 @@ function bindCandidateContactActions() {
 
   document.querySelectorAll("[data-email-candidate]").forEach(button => {
     button.addEventListener("click", () => {
-      window.location.href = `mailto:${demoCandidateContact.email}?subject=${encodeURIComponent(`Regarding your profile, ${demoCandidateContact.name}`)}`;
+      window.location.href = `mailto:${candidateContact.email}?subject=${encodeURIComponent(`Regarding your profile, ${candidateContact.name}`)}`;
     });
   });
 }
@@ -314,6 +316,7 @@ async function hydrate() {
 function render() {
   document.body.classList.toggle("dark", state.theme === "dark");
   const pathname = window.location.pathname;
+  if (!pathname.startsWith("/hr")) stopHrEmployeesLive();
   if (pathname.startsWith("/hr/employees/")) return renderHrEmployeeRoute(pathname);
   if (pathname.includes("/dashboard")) return renderDashboard(pathname);
   if (pathname === "/") logoutWhenLoginPageOpens();
@@ -343,7 +346,7 @@ function landing() {
                 <img src="/talme-logo.png" alt="Talme Technologies Pvt Ltd">
                 <div><strong>Talme Hiring Portal</strong><span>Talent search and HR workspace</span></div>
               </div>
-              <div class="shot-status">${icon("users")} 1,501 profiles</div>
+              <div class="shot-status" data-profile-count>${icon("users")} ${profileCountLabel()} profiles</div>
             </div>
             <div class="shot-body">
               <aside class="shot-sidebar">
@@ -429,6 +432,28 @@ function bindLanding() {
   document.querySelectorAll("[data-dashboard]").forEach(button => button.addEventListener("click", () => navigate(state.user?.redirectTo || "/")));
   document.querySelectorAll("[data-logout]").forEach(button => button.addEventListener("click", logout));
   document.querySelector("[data-theme]")?.addEventListener("click", toggleTheme);
+  loadPublicProfileCount();
+}
+
+function profileCountLabel() {
+  return formatNumber(state.profileCount || 0);
+}
+
+async function loadPublicProfileCount() {
+  const target = document.querySelector("[data-profile-count]");
+  if (!target) return;
+  try {
+    const response = await fetch("/api/public/profile-count", {
+      cache: "no-store",
+      credentials: "same-origin"
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || typeof payload.totalProfiles !== "number") return;
+    state.profileCount = payload.totalProfiles;
+    localStorage.setItem("talme_profile_count", String(state.profileCount));
+    target.innerHTML = `${icon("users")} ${profileCountLabel()} profiles`;
+  } catch {
+  }
 }
 
 function profileInitials(name = "") {
@@ -445,12 +470,12 @@ function toggleTheme() {
   render();
 }
 
-function openAuth(mode = "login", role = state.selectedRole) {
+function openAuth(mode = "login", role = state.selectedRole, message = "") {
   state.authMode = mode;
   state.selectedRole = role;
   const existing = document.querySelector(".modal-backdrop");
   if (existing) existing.remove();
-  document.body.insertAdjacentHTML("beforeend", authModal());
+  document.body.insertAdjacentHTML("beforeend", authModal(message));
   bindAuth();
 }
 
@@ -487,16 +512,21 @@ function authModal(message = "") {
 }
 
 function authTitle() {
-  if (state.authMode === "register") return "Create account";
-  if (state.authMode === "otp") return "Verify OTP";
-  if (state.authMode === "reset") return "Reset password";
-  return "Welcome back";
+  const titles = {
+    login: "Welcome back",
+    register: "Create account",
+    forgot: "Forgot password",
+    "forgot-otp": "Verify OTP",
+    "forgot-reset": "Reset password"
+  };
+  return titles[state.authMode] || "Welcome back";
 }
 
 function authContent(message = "") {
   if (state.authMode === "register") return registerForm(message);
-  if (state.authMode === "otp") return forgotOtpForm(message);
-  if (state.authMode === "reset") return resetPasswordForm(message);
+  if (state.authMode === "forgot") return forgotRequestForm(message);
+  if (state.authMode === "forgot-otp") return forgotOtpForm(message);
+  if (state.authMode === "forgot-reset") return forgotResetForm(message);
   return loginForm(message);
 }
 
@@ -511,15 +541,16 @@ function loginForm(message) {
       </div>
       <div class="field">
         <label>Password</label>
-        <input name="password" type="password" placeholder="Enter your password" autocomplete="current-password" required>
+        <div class="password-wrap">
+          <input name="password" type="password" placeholder="Enter your password" autocomplete="current-password" required>
+          <button type="button" class="password-toggle" data-toggle-password="password" title="Show password">${icon("eye")}</button>
+        </div>
       </div>
-
       <div class="form-row">
         <label class="check"><input name="rememberMe" type="checkbox"> Remember Me</label>
         <button type="button" class="link-button" data-forgot>Forgot Password</button>
       </div>
       <button class="btn primary" type="submit">${icon("lock")}Login using Email + Password</button>
-
       <p class="notice ${message ? "ok" : ""}" data-notice>${message}</p>
       <button class="link-button" type="button" data-switch-register>Need registration?</button>
     </form>
@@ -544,7 +575,7 @@ function registerForm(message) {
       </div>
       <div class="field">
         <label>Mobile</label>
-        <input name="phone" inputmode="tel">
+        <input name="phone" inputmode="tel" autocomplete="tel" required>
       </div>
       <div class="field">
         <label>Password</label>
@@ -567,13 +598,28 @@ function registerForm(message) {
   `;
 }
 
+function forgotRequestForm(message) {
+  return h`
+    <form class="form" data-forgot-request-form>
+      <div class="field">
+        <label>Registered Email</label>
+        <input name="email" type="email" autocomplete="email" value="${escapeHtml(state.forgotEmail)}" placeholder="Enter your registered email" required>
+        <small class="field-hint">We will send a 6-digit OTP to this email.</small>
+      </div>
+      <button class="btn primary" type="submit">${icon("key")}Send OTP</button>
+      <p class="notice ${message ? "ok" : ""}" data-notice>${message}</p>
+      <button class="link-button" type="button" data-switch-login>Back to login</button>
+    </form>
+  `;
+}
+
 function forgotOtpForm(message) {
   return h`
     <form class="form" data-forgot-otp-form>
       <div class="field">
         <label>OTP</label>
         <input name="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="Enter 6-digit OTP" required>
-        <small class="field-hint">OTP sent to ${escapeHtml(state.passwordResetEmail)}. It expires in 10 minutes.</small>
+        <small class="field-hint">OTP sent to ${escapeHtml(state.forgotEmail)}. It expires in 10 minutes.</small>
       </div>
       <button class="btn primary" type="submit">${icon("shield")}Verify OTP</button>
       <div class="form-row">
@@ -585,9 +631,9 @@ function forgotOtpForm(message) {
   `;
 }
 
-function resetPasswordForm(message) {
+function forgotResetForm(message) {
   return h`
-    <form class="form" data-reset-password-form>
+    <form class="form" data-forgot-reset-form>
       <div class="field">
         <label>New Password</label>
         <div class="password-wrap">
@@ -609,28 +655,6 @@ function resetPasswordForm(message) {
   `;
 }
 
-function demoEmail(role) {
-  const map = {
-    candidate: "candidate@talme.test",
-    employer: "employer@talme.test",
-    recruiter: "recruiter@talme.test",
-    employee: "employee@talme.test",
-    hr_manager: "hr@talme.test",
-    company_admin: "company.admin@talme.test",
-    platform_admin: "platform.admin@talme.test",
-    super_admin: "saidarshaan@talme.in"
-  };
-  return map[role] || map.super_admin;
-}
-
-function demoPassword(role) {
-  const map = {
-    super_admin: "talme123",
-    hr_manager: "Password123!"
-  };
-  return map[role] || "Password123!";
-}
-
 function bindAuth() {
   document.querySelector("[data-close]")?.addEventListener("click", () => document.querySelector(".modal-backdrop")?.remove());
   document.querySelectorAll("[data-tab]").forEach(button => button.addEventListener("click", () => {
@@ -641,16 +665,20 @@ function bindAuth() {
   document.querySelector("[data-switch-login]")?.addEventListener("click", () => openAuth("login"));
   document.querySelector("[data-login-form]")?.addEventListener("submit", submitLogin);
   document.querySelector("[data-register-form]")?.addEventListener("submit", submitRegister);
+  document.querySelector("[data-forgot-request-form]")?.addEventListener("submit", submitForgotRequest);
   document.querySelector("[data-forgot-otp-form]")?.addEventListener("submit", submitForgotOtp);
-  document.querySelector("[data-reset-password-form]")?.addEventListener("submit", submitResetPassword);
+  document.querySelector("[data-forgot-reset-form]")?.addEventListener("submit", submitForgotReset);
   document.querySelector("[data-resend-otp]")?.addEventListener("click", resendForgotOtp);
-  document.querySelector("[data-otp]")?.addEventListener("click", requestOtp);
-  document.querySelector("[data-forgot]")?.addEventListener("click", forgotPassword);
+  document.querySelector("[data-forgot]")?.addEventListener("click", openForgotPassword);
   document.querySelectorAll("[data-toggle-password]").forEach(button => button.addEventListener("click", togglePasswordVisibility));
 }
 
 function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
+}
+
+function normalizePasswordInput(value) {
+  return String(value || "").trim();
 }
 
 function setNotice(text, ok = false) {
@@ -660,38 +688,160 @@ function setNotice(text, ok = false) {
   notice.className = `notice ${ok ? "ok" : "error"}`;
 }
 
+function authNoticeMessage(error, fallback) {
+  const message = String(error?.message || error || "");
+  if (/already registered/i.test(message)) return "This email is already registered. Please login.";
+  if (/email address is not registered|account not found/i.test(message)) return "Email address is not registered.";
+  if (/invalid password|incorrect password/i.test(message)) return "Invalid password.";
+  if (/invalid otp/i.test(message)) return "Invalid OTP.";
+  if (/otp has expired/i.test(message)) return "OTP has expired. Please request a new OTP.";
+  if (/email service is not configured/i.test(message)) return message;
+  if (error?.status >= 500) return "Something went wrong. Please try again later.";
+  return message || fallback || "Something went wrong. Please try again later.";
+}
+
+function setSubmitLoading(form, isLoading, label) {
+  const button = form.querySelector('button[type="submit"]');
+  if (!button) return;
+  if (!button.dataset.idleHtml) button.dataset.idleHtml = button.innerHTML;
+  button.disabled = isLoading;
+  button.innerHTML = isLoading ? label : button.dataset.idleHtml;
+}
+
 async function submitLogin(event) {
   event.preventDefault();
-  const body = formData(event.currentTarget);
+  const form = event.currentTarget;
+  const body = formData(form);
+  body.password = normalizePasswordInput(body.password);
   body.role = state.selectedRole;
-  body.rememberMe = event.currentTarget.rememberMe.checked;
+  body.rememberMe = form.rememberMe.checked;
+  if (!body.email || !body.password) {
+    return setNotice("Email and password are required.");
+  }
+  setSubmitLoading(form, true, "Logging in...");
   try {
     const payload = await api("/api/auth/login", { method: "POST", body });
     if (payload.requires2fa) return setNotice(payload.message);
+    setNotice("Login successful.", true);
     setTokens(payload);
     document.querySelector(".modal-backdrop")?.remove();
     navigate(payload.user.redirectTo);
   } catch (error) {
-    setNotice(error.message);
+    setNotice(authNoticeMessage(error, "Something went wrong. Please try again later."));
+  } finally {
+    setSubmitLoading(form, false);
   }
 }
 
 async function submitRegister(event) {
   event.preventDefault();
-  const body = formData(event.currentTarget);
+  const form = event.currentTarget;
+  const body = formData(form);
+  body.password = normalizePasswordInput(body.password);
+  body.confirmPassword = normalizePasswordInput(body.confirmPassword);
+  if (!body.name || !body.email || !body.phone || !body.password || !body.confirmPassword) {
+    return setNotice("Name, email, phone, password, and confirm password are required.");
+  }
   if (body.password !== body.confirmPassword) {
     return setNotice("Password and Confirm Password must match");
   }
   if (!isStrongPassword(body.password)) {
     return setNotice("Password must be at least 8 characters and include uppercase, lowercase, number, and special character");
   }
+  setSubmitLoading(form, true, "Creating account...");
   try {
-    const payload = await api("/api/auth/register", { method: "POST", body });
-    setTokens(payload);
-    document.querySelector(".modal-backdrop")?.remove();
-    navigate(payload.user.redirectTo);
+    await api("/api/auth/register", { method: "POST", body });
+    openAuth("login", state.selectedRole, "Registration successful. Please login.");
   } catch (error) {
-    setNotice(error.message);
+    setNotice(authNoticeMessage(error, "Something went wrong. Please try again later."));
+  } finally {
+    setSubmitLoading(form, false);
+  }
+}
+
+function openForgotPassword() {
+  state.forgotEmail = document.querySelector("[data-login-form] [name=email]")?.value.trim() || "";
+  openAuth("forgot", state.selectedRole);
+}
+
+async function submitForgotRequest(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const body = formData(form);
+  const email = String(body.email || "").trim().toLowerCase();
+  if (!email) return setNotice("Email is required.");
+  setSubmitLoading(form, true, "Sending OTP...");
+  try {
+    const payload = await api("/api/auth/forgot-password", { method: "POST", body: { email, role: state.selectedRole } });
+    state.forgotEmail = email;
+    openAuth("forgot-otp", state.selectedRole, payload.message);
+  } catch (error) {
+    setNotice(authNoticeMessage(error, "Something went wrong. Please try again later."));
+  } finally {
+    setSubmitLoading(form, false);
+  }
+}
+
+async function resendForgotOtp(event) {
+  const button = event.currentTarget;
+  if (!state.forgotEmail) return openAuth("forgot", state.selectedRole);
+  button.disabled = true;
+  try {
+    const payload = await api("/api/auth/forgot-password", { method: "POST", body: { email: state.forgotEmail, role: state.selectedRole } });
+    setNotice(payload.message, true);
+  } catch (error) {
+    setNotice(authNoticeMessage(error, "Something went wrong. Please try again later."));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function submitForgotOtp(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const body = formData(form);
+  const otp = String(body.otp || "").trim();
+  if (!/^\d{6}$/.test(otp)) return setNotice("Invalid OTP.");
+  setSubmitLoading(form, true, "Verifying...");
+  try {
+    const payload = await api("/api/auth/forgot-password/verify", {
+      method: "POST",
+      body: { email: state.forgotEmail, role: state.selectedRole, otp }
+    });
+    openAuth("forgot-reset", state.selectedRole, payload.message || "OTP verified.");
+  } catch (error) {
+    setNotice(authNoticeMessage(error, "Invalid OTP."));
+  } finally {
+    setSubmitLoading(form, false);
+  }
+}
+
+async function submitForgotReset(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const body = formData(form);
+  body.password = normalizePasswordInput(body.password);
+  body.confirmPassword = normalizePasswordInput(body.confirmPassword);
+  if (body.password !== body.confirmPassword) return setNotice("Password and Confirm Password must match");
+  if (!isStrongPassword(body.password)) {
+    return setNotice("Password must be at least 8 characters and include uppercase, lowercase, number, and special character");
+  }
+  setSubmitLoading(form, true, "Updating password...");
+  try {
+    const payload = await api("/api/auth/reset-password", {
+      method: "POST",
+      body: {
+        email: state.forgotEmail,
+        role: state.selectedRole,
+        password: body.password,
+        confirmPassword: body.confirmPassword
+      }
+    });
+    openAuth("login", state.selectedRole, payload.message);
+  } catch (error) {
+    setNotice(authNoticeMessage(error, "Something went wrong. Please try again later."));
+  } finally {
+    setSubmitLoading(form, false);
   }
 }
 
@@ -708,112 +858,6 @@ function togglePasswordVisibility(event) {
   input.type = showing ? "password" : "text";
   button.title = showing ? "Show password" : "Hide password";
   button.innerHTML = icon(showing ? "eye" : "eyeOff");
-}
-
-async function socialLogin(provider) {
-  try {
-    const payload = await api("/api/auth/social", {
-      method: "POST",
-      body: {
-        provider,
-        role: state.selectedRole,
-        email: `${provider}.${state.selectedRole}@talme.test`,
-        name: `${provider} ${state.selectedRole}`.replaceAll("_", " ")
-      }
-    });
-    setTokens(payload);
-    document.querySelector(".modal-backdrop")?.remove();
-    navigate(payload.user.redirectTo);
-  } catch (error) {
-    setNotice(error.message);
-  }
-}
-
-async function requestOtp() {
-  const form = document.querySelector("[data-login-form]");
-  const contact = form.otpContact.value || form.email.value;
-  try {
-    const payload = await api("/api/auth/otp/request", { method: "POST", body: { contact } });
-    const code = prompt(`OTP sent. Demo code: ${payload.devCode}`);
-    if (!code) return;
-    const verified = await api("/api/auth/otp/verify", { method: "POST", body: { contact, code, rememberMe: form.rememberMe.checked } });
-    if (verified.accessToken) {
-      setTokens(verified);
-      document.querySelector(".modal-backdrop")?.remove();
-      navigate(verified.user.redirectTo);
-    } else {
-      setNotice(verified.message, true);
-    }
-  } catch (error) {
-    setNotice(error.message);
-  }
-}
-
-async function forgotPassword() {
-  const email = document.querySelector("[data-login-form] [name=email]")?.value.trim();
-  if (!email) return setNotice("Enter your registered email first.");
-  try {
-    const payload = await api("/api/auth/forgot-password", { method: "POST", body: { email } });
-    state.passwordResetEmail = email;
-    openAuth("otp", state.selectedRole, payload.message);
-  } catch (error) {
-    setNotice(error.message);
-  }
-}
-
-async function resendForgotOtp(event) {
-  const button = event.currentTarget;
-  if (!state.passwordResetEmail) return openAuth("login", state.selectedRole);
-  button.disabled = true;
-  try {
-    const payload = await api("/api/auth/forgot-password", { method: "POST", body: { email: state.passwordResetEmail } });
-    setNotice(payload.message, true);
-  } catch (error) {
-    setNotice(error.message);
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function submitForgotOtp(event) {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const body = formData(form);
-  const otp = String(body.otp || "").trim();
-  if (!/^\d{6}$/.test(otp)) return setNotice("Invalid OTP.");
-  try {
-    const payload = await api("/api/auth/forgot-password/verify", {
-      method: "POST",
-      body: { email: state.passwordResetEmail, otp }
-    });
-    openAuth("reset", state.selectedRole, payload.message || "OTP verified.");
-  } catch (error) {
-    setNotice(error.message);
-  }
-}
-
-async function submitResetPassword(event) {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const body = formData(form);
-  if (body.password !== body.confirmPassword) return setNotice("Password and Confirm Password must match");
-  if (!isStrongPassword(body.password)) {
-    return setNotice("Password must be at least 8 characters and include uppercase, lowercase, number, and special character");
-  }
-  try {
-    const payload = await api("/api/auth/reset-password", {
-      method: "POST",
-      body: {
-        email: state.passwordResetEmail,
-        password: body.password,
-        confirmPassword: body.confirmPassword
-      }
-    });
-    state.passwordResetEmail = "";
-    openAuth("login", state.selectedRole, payload.message);
-  } catch (error) {
-    setNotice(error.message);
-  }
 }
 
 function navigate(path) {
@@ -971,11 +1015,6 @@ function renderAdminDashboard(root, title = "Admin Control Center", role = "Supe
 }
 
 function renderHrDashboard(root) {
-  const workspace = loadRoleWorkspace("talme_hr_workspace", {
-    announcement: "Payroll verification and attendance follow-up for this week.",
-    priority: "Payroll cutoff",
-    ticketStatus: "18 pending"
-  });
   root.innerHTML = h`
     <main class="site role-app hr-app">
       ${roleTopbar("Talme HR Workspace", "HR Manager", "/hr/dashboard")}
@@ -1061,7 +1100,7 @@ function renderHrCandidateProfile(root) {
               <button class="btn success" type="button" data-whatsapp-candidate>WhatsApp</button>
             </div>
             <div class="profile-contact">
-              <span>${demoCandidateContact.email}</span>
+              <span>${candidateContact.email}</span>
               <span class="candidate-phone-value" data-candidate-phone hidden></span>
               <b>Verified phone and email</b>
             </div>
@@ -1547,6 +1586,7 @@ async function finishImportProgress(submit) {
   if (submit) submit.textContent = "100% completed";
   await new Promise(resolve => setTimeout(resolve, 550));
 }
+
 function bindCandidateImport() {
   document.querySelectorAll("[data-import-close]").forEach(button => {
     button.addEventListener("click", () => document.querySelector(".import-backdrop")?.remove());
@@ -1691,15 +1731,49 @@ async function loadHrEmployees() {
     state.hrEmployeeVisibleCount = 50;
     renderHrEmployees();
   } catch (error) {
-    if (error.status === 401) {
-      clearStoredAuth();
-      renderLandingPage();
-      openAuth("login", state.selectedRole);
-      setNotice("Please login again to view employees.");
-      return;
-    }
     target.innerHTML = `<div class="security-empty">${escapeHtml(error.message)}</div>`;
   }
+}
+
+function employeeListSignature(items = state.hrEmployees) {
+  return items
+    .map((employee, index) => [
+      employeeRecordId(employee, index),
+      employee.name,
+      employee.email,
+      employee.phone,
+      employee.updatedAt,
+      employee.last_edited_at,
+      employee.audit_at
+    ].map(value => String(value || "")).join(":"))
+    .join("|");
+}
+
+async function refreshHrEmployeesLive() {
+  if (hrEmployeesLiveLoading || !document.querySelector("[data-hr-employees]")) return;
+  hrEmployeesLiveLoading = true;
+  const before = employeeListSignature();
+  try {
+    const previousVisibleCount = state.hrEmployeeVisibleCount;
+    await fetchHrEmployees();
+    state.hrEmployeeVisibleCount = Math.max(previousVisibleCount, Math.min(50, state.hrEmployees.length || previousVisibleCount));
+    if (employeeListSignature() !== before) renderHrEmployees();
+  } catch {
+  } finally {
+    hrEmployeesLiveLoading = false;
+  }
+}
+
+function startHrEmployeesLive() {
+  if (hrEmployeesLiveTimer) return;
+  hrEmployeesLiveTimer = setInterval(refreshHrEmployeesLive, 4000);
+}
+
+function stopHrEmployeesLive() {
+  if (!hrEmployeesLiveTimer) return;
+  clearInterval(hrEmployeesLiveTimer);
+  hrEmployeesLiveTimer = null;
+  hrEmployeesLiveLoading = false;
 }
 
 async function fetchHrEmployees() {
@@ -1708,6 +1782,8 @@ async function fetchHrEmployees() {
     api("/api/hr/imported-employees").catch(() => ({ items: [] }))
   ]);
   state.hrEmployees = mergeHrEmployeeLists(payload.items || [], importedPayload.items || []);
+  state.profileCount = state.hrEmployees.length;
+  localStorage.setItem("talme_profile_count", String(state.profileCount));
   return state.hrEmployees;
 }
 
@@ -1744,7 +1820,9 @@ function renderHrEmployees(items = state.hrEmployees) {
   const visibleItems = matchedItems.slice(0, state.hrEmployeeVisibleCount);
   target.innerHTML = `
     <div class="employee-list-summary">
-      <strong>${visibleItems.length}</strong> of <strong>${matchedItems.length}</strong> ${state.hrShowDuplicates ? "duplicate " : ""}employees shown${query ? ` for <strong>${escapeHtml(query)}</strong>` : ""}
+      <span class="employee-live-dot" aria-hidden="true"></span>
+      <span class="live-label">Live</span>
+      <span><strong>${visibleItems.length}</strong> of <strong>${matchedItems.length}</strong> ${state.hrShowDuplicates ? "duplicate " : ""}employees shown${query ? ` for <strong>${escapeHtml(query)}</strong>` : ""}</span>
     </div>
     ${visibleItems.map((employee, index) => `
       <section class="candidate-result-card employee-result-card">
@@ -1778,6 +1856,7 @@ function renderHrEmployees(items = state.hrEmployees) {
             <span>${icon("eye")} Active</span>
             <span>${icon("arrow")} HR</span>
           </div>
+          ${employeeAuditLine(employee) ? `<div class="employee-audit-line">${escapeHtml(employeeAuditLine(employee))}</div>` : ""}
         </div>
         <aside class="candidate-result-side">
           <div class="candidate-avatar-placeholder">${profileInitials(employee.name)}</div>
@@ -2072,6 +2151,7 @@ function renderHrEmployeeProfile(root, employee, options = {}) {
               <span class="candidate-phone-value" data-employee-profile-phone hidden></span>
               <b>Employee record</b>
             </div>
+            ${employeeAuditLine(employee) ? `<div class="employee-audit-line profile-audit-line">${escapeHtml(employeeAuditLine(employee))}</div>` : ""}
           </div>
           <div class="profile-timeline">
             <span>Profile</span>
@@ -2136,6 +2216,15 @@ function employeeProfileDetails(employee, view) {
               ${view.detailRows.map(([label, value]) => `
                 <span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "Not added")}</strong>
               `).join("")}
+            </div>
+          </section>
+
+          <section class="profile-section">
+            <h2>Update history</h2>
+            <div class="profile-detail-grid update-history-grid">
+              <span>Last update</span><strong>${escapeHtml(employeeAuditLine(employee) || "No update history recorded yet")}</strong>
+              <span>Created by</span><strong>${escapeHtml(employeeAuditAccount(employee.created_by_name, employee.created_by_email) || "Not recorded")}</strong>
+              <span>Created at</span><strong>${escapeHtml(formatEmployeeAuditDate(employee.created_at_audit) || "Not recorded")}</strong>
             </div>
           </section>
 
@@ -2371,6 +2460,9 @@ function bindRoleDashboard(scope) {
     clearInterval(securityMonitorTimer);
     securityMonitorTimer = null;
   }
+  if (scope !== "hr" || !document.querySelector("[data-hr-employees]")) {
+    stopHrEmployeesLive();
+  }
   bindLanding();
   bindCandidateContactActions();
   document.querySelector("[data-role-home]")?.addEventListener("click", event => {
@@ -2411,7 +2503,10 @@ function bindRoleDashboard(scope) {
     notice.textContent = `${scope === "admin" ? "Admin" : "HR"} changes saved only in this workspace.`;
     notice.className = "notice ok";
   });
-  if (scope === "hr") loadHrEmployees();
+  if (scope === "hr" && document.querySelector("[data-hr-employees]")) {
+    loadHrEmployees();
+    startHrEmployeesLive();
+  }
 }
 
 async function loadRegisteredDevices() {
@@ -2521,8 +2616,49 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
+function formatEmployeeAuditDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const datePart = new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric"
+  }).format(date);
+  const timePart = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
+  return `${datePart}, ${timePart}`;
+}
+
+function employeeAuditLine(employee) {
+  const action = employee.audit_action === "created" ? "Created by" : "Last edited by";
+  const name = employee.audit_user_name || employee.last_edited_by_name || employee.created_by_name;
+  const at = employee.audit_at || employee.last_edited_at || employee.created_at_audit;
+  const formatted = formatEmployeeAuditDate(at);
+  if (!name || !formatted) return "";
+  return `${action} ${name} • ${formatted}`;
+}
+
 function sessionStatusClass(value = "") {
   return String(value).toLowerCase().replace(/\s+/g, "-");
+}
+
+function employeeAuditLine(employee) {
+  const name = employee.last_edited_by_name || employee.audit_user_name || employee.created_by_name;
+  const email = employee.last_edited_by_email || employee.audit_user_email || employee.created_by_email;
+  const at = employee.last_edited_at || employee.audit_at || employee.created_at_audit;
+  const formatted = formatEmployeeAuditDate(at);
+  if (!name || !formatted) return "";
+  const account = employeeAuditAccount(name, email);
+  return `Last updated by ${account} on ${formatted}`;
+}
+
+function employeeAuditAccount(name, email) {
+  if (!name && !email) return "";
+  if (name && email && email !== name) return `${name} (${email})`;
+  return name || email;
 }
 
 function formatNumber(value) {

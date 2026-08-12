@@ -7,6 +7,66 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model AuthUser {
+  id           BigInt   @id @default(autoincrement())
+  fullName     String   @map("full_name")
+  email        String
+  phone        String
+  passwordHash String   @map("password_hash")
+  role         String
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  isActive     Boolean  @default(true) @map("is_active")
+  passwordOtps AuthPasswordOtp[]
+  createdEmployeeAudits EmployeeRecordAudit[] @relation("EmployeeAuditCreatedBy")
+  lastEditedEmployeeAudits EmployeeRecordAudit[] @relation("EmployeeAuditLastEditedBy")
+
+  @@index([email, role])
+  @@map("auth_users")
+}
+
+model AuthPasswordOtp {
+  id             BigInt    @id @default(autoincrement())
+  authUserId     BigInt    @map("auth_user_id")
+  email          String
+  otpHash        String    @map("otp_hash")
+  resetTokenHash String?   @map("reset_token_hash")
+  expiresAt      DateTime  @map("expires_at")
+  resetExpiresAt DateTime? @map("reset_expires_at")
+  verifiedAt     DateTime? @map("verified_at")
+  usedAt         DateTime? @map("used_at")
+  attemptCount   Int       @default(0) @map("attempt_count")
+  requestIp      String?   @map("request_ip")
+  userAgent      String?   @map("user_agent")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  authUser       AuthUser  @relation(fields: [authUserId], references: [id], onDelete: Cascade)
+
+  @@index([authUserId, usedAt, expiresAt], map: "auth_password_otps_user_active_idx")
+  @@index([email, createdAt], map: "auth_password_otps_email_created_idx")
+  @@map("auth_password_otps")
+}
+
+model EmployeeRecordAudit {
+  recordKey                String    @id @map("record_key")
+  employeeUserId           String?   @map("employee_user_id")
+  employeeEmail            String?   @map("employee_email")
+  employeePhone            String?   @map("employee_phone")
+  createdByAuthUserId      BigInt?   @map("created_by_auth_user_id")
+  createdByName            String    @map("created_by_name")
+  createdByEmail           String?   @map("created_by_email")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  lastEditedByAuthUserId   BigInt?   @map("last_edited_by_auth_user_id")
+  lastEditedByName         String    @map("last_edited_by_name")
+  lastEditedByEmail        String?   @map("last_edited_by_email")
+  lastEditedAt             DateTime  @default(now()) @map("last_edited_at")
+  lastAction               String    @default("created") @map("last_action")
+  createdByAuthUser        AuthUser? @relation("EmployeeAuditCreatedBy", fields: [createdByAuthUserId], references: [id], onDelete: SetNull)
+  lastEditedByAuthUser     AuthUser? @relation("EmployeeAuditLastEditedBy", fields: [lastEditedByAuthUserId], references: [id], onDelete: SetNull)
+
+  @@index([employeeEmail], map: "employee_record_audits_employee_email_idx")
+  @@map("employee_record_audits")
+}
+
 model Candidate {
   id                 String   @id @default(cuid())
   fullName           String
