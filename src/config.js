@@ -25,6 +25,7 @@ module.exports = {
   refreshTokenTtlSeconds: 7 * 24 * 60 * 60,
   rememberMeTtlSeconds: 30 * 24 * 60 * 60,
   sessionTimeoutSeconds: 30 * 60,
+  isProductionRuntime,
   dbPath: process.env.DB_PATH || defaultDbPath,
   cvUploadDir: process.env.CV_UPLOAD_DIR || defaultCvUploadDir,
   publicDir: path.join(rootDir, "public"),

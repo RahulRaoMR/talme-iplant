@@ -87,3 +87,64 @@ model Candidate {
   @@index([email])
   @@index([location])
 }
+
+model HrEmployeeImport {
+  id             BigInt             @id @default(autoincrement())
+  source         String
+  generatedAt    DateTime?          @map("generated_at")
+  totalRows      Int                @default(0) @map("total_rows")
+  importedRows   Int                @default(0) @map("imported_rows")
+  skippedRows    Int                @default(0) @map("skipped_rows")
+  skippedPreview Json?              @map("skipped_preview")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  records        HrEmployeeRecord[]
+
+  @@map("hr_employee_imports")
+}
+
+model HrEmployeeRecord {
+  id                     BigInt            @id @default(autoincrement())
+  recordKey              String            @unique @map("record_key")
+  sourceType             String            @map("source_type")
+  sourceId               String?           @map("source_id")
+  sourceFile             String?           @map("source_file")
+  rowNumber              Int?              @map("row_number")
+  importId               BigInt?           @map("import_id")
+  localUserId            BigInt?           @map("local_user_id")
+  localEmployeeAccountId BigInt?           @map("local_employee_account_id")
+  localCompanyId         BigInt?           @map("local_company_id")
+  localRoleId            BigInt?           @map("local_role_id")
+  localRoleCompanyId     BigInt?           @map("local_role_company_id")
+  localRoleAssignedAt    DateTime?         @map("local_role_assigned_at")
+  employeeCode           String?           @map("employee_code")
+  name                   String
+  email                  String?
+  phone                  String?
+  status                 String            @default("active")
+  emailVerified          Boolean?          @map("email_verified")
+  phoneVerified          Boolean?          @map("phone_verified")
+  designation            String?
+  department             String?
+  location               String?
+  keywords               String?
+  experience             Float?
+  currentCompany         String?           @map("current_company")
+  currentDesignation     String?           @map("current_designation")
+  cvFileName             String?           @map("cv_file_name")
+  cvStoredName           String?           @map("cv_stored_name")
+  sourceCreatedAt        DateTime?         @map("source_created_at")
+  sourceUpdatedAt        DateTime?         @map("source_updated_at")
+  sourcePayload          Json?             @map("source_payload")
+  createdAt              DateTime          @default(now()) @map("created_at")
+  updatedAt              DateTime          @default(now()) @updatedAt @map("updated_at")
+  archivedAt             DateTime?         @map("archived_at")
+  import                 HrEmployeeImport? @relation(fields: [importId], references: [id], onDelete: SetNull)
+
+  @@index([sourceType], map: "hr_employee_records_source_type_idx")
+  @@index([sourceId], map: "hr_employee_records_source_id_idx")
+  @@index([localUserId], map: "hr_employee_records_local_user_id_idx")
+  @@index([email], map: "hr_employee_records_email_idx")
+  @@index([phone], map: "hr_employee_records_phone_idx")
+  @@index([name], map: "hr_employee_records_name_idx")
+  @@map("hr_employee_records")
+}

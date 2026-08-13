@@ -12,7 +12,8 @@ const {
   rememberMeTtlSeconds,
   sessionTimeoutSeconds,
   cvUploadDir,
-  employeeInviteCode
+  employeeInviteCode,
+  isProductionRuntime
 } = require("./config");
 const {
   parseJsonBody,
@@ -50,6 +51,7 @@ const {
   getEmployeeRecordAudits
 } = require("./auth-store");
 const { requireEmailConfig, sendPasswordResetOtpEmail } = require("./email");
+const employeeStore = require("./employee-store");
 
 initDb();
 
@@ -1012,9 +1014,18 @@ async function platformCompanies(req, res) {
   sendJson(res, 200, { items: rows });
 }
 
+async function shouldUsePersistentHrEmployees() {
+  if (isProductionRuntime) return true;
+  if (!employeeStore.hasEmployeeDatabase()) return false;
+  return employeeStore.hasEmployeeTables().catch(() => false);
+}
+
 async function hrEmployees(req, res) {
   const context = await requireAuth(req, res, "employees.manage");
   if (!context) return;
+  if (await shouldUsePersistentHrEmployees()) {
+    return sendJson(res, 200, { items: await attachEmployeeAudits(await employeeStore.listEmployees()) });
+  }
   const rows = db.prepare(`
     SELECT u.id, ea.employee_code, u.name,
            CASE WHEN lower(u.email) LIKE 'local-import-%@talme.local' THEN '' ELSE u.email END AS email,
@@ -1034,6 +1045,13 @@ async function hrEmployees(req, res) {
 async function importedHrEmployees(req, res) {
   const context = await requireAuth(req, res, "employees.manage");
   if (!context) return;
+  if (await shouldUsePersistentHrEmployees()) {
+    const payload = await employeeStore.listImportedEmployees();
+    return sendJson(res, 200, {
+      items: await attachEmployeeAudits(payload.items),
+      summary: payload.summary
+    });
+  }
 
   const filePath = path.join(__dirname, "..", "data", "imported-employees.json");
   if (!fs.existsSync(filePath)) {
@@ -1081,6 +1099,22 @@ async function createEmployee(req, res) {
   const employeeCode = String(body.employeeCode || "").trim();
   const designation = record.currentDesignation || "Employee";
   const department = record.currentCompany || record.location || "General";
+
+  if (await shouldUsePersistentHrEmployees()) {
+    const saved = await employeeStore.saveManualEmployee({ record, body: { ...body, employeeCode }, cv });
+    const auditedEmployee = await writeEmployeeAudit(saved.employee, context, saved.created ? "created" : "edited");
+    audit(req, context.user.id, "Employee Add", {
+      employeeId: auditedEmployee.id,
+      email,
+      employeeCode: auditedEmployee.employee_code,
+      cvFileName: auditedEmployee.cv_file_name
+    }, "hr_employee_record", auditedEmployee.id);
+    return sendJson(res, saved.created ? 201 : 200, {
+      success: true,
+      message: saved.created ? "Employee added successfully" : "Employee updated successfully",
+      employee: employeeResponse(auditedEmployee)
+    });
+  }
 
   const companyId = companyIdForUser(context.user.id);
   const existingUser = getUserByEmail(email);
@@ -1492,6 +1526,18 @@ function mergedEmployeeProfileCount(dbItems, importedItems) {
 }
 
 async function publicProfileCount(req, res) {
+  if (await shouldUsePersistentHrEmployees()) {
+    const counts = await employeeStore.publicProfileCount();
+    return sendJson(res, 200, {
+      success: true,
+      totalProfiles: counts.totalProfiles,
+      profiles: counts.totalProfiles,
+      databaseProfiles: counts.databaseProfiles,
+      importedProfiles: counts.importedProfiles,
+      source: "hr_employee_records",
+      generatedAt: null
+    });
+  }
   const payload = readImportedEmployeesPayload();
   const dbItems = publicEmployeeRows();
   const totalProfiles = mergedEmployeeProfileCount(dbItems, payload.items);
@@ -1642,8 +1688,12 @@ function findImportedEmployeeIndex(items, employeeId) {
   });
 }
 
-function findEmployeeCvRecord(employeeId) {
+async function findEmployeeCvRecord(employeeId) {
   const id = decodeURIComponent(String(employeeId || ""));
+  if (await shouldUsePersistentHrEmployees()) {
+    const employee = await employeeStore.findEmployeeByIdentifier(id);
+    if (employee) return employee;
+  }
   const importedPayload = readImportedEmployeesPayload();
   const importedIndex = findImportedEmployeeIndex(importedPayload.items, id);
   if (importedIndex >= 0) return importedPayload.items[importedIndex];
@@ -1666,6 +1716,17 @@ async function updateHrEmployee(req, res, employeeId) {
   const data = normalizeEmployeeUpdate(form.fields);
   const cv = saveCandidateCv(form.files.cv);
   const id = decodeURIComponent(String(employeeId || ""));
+
+  if (await shouldUsePersistentHrEmployees()) {
+    let updated = await employeeStore.updateEmployee(id, data, cv);
+    updated = await writeEmployeeAudit(updated, context, "edited");
+    audit(req, context.user.id, "Employee Update", { employeeId: id, imported: updated.source === "imported-employees.json" || updated.source === "imported", cvFileName: updated.cv_file_name }, "hr_employee_record", id);
+    return sendJson(res, 200, {
+      success: true,
+      message: "Employee updated successfully",
+      employee: employeeResponse(updated)
+    });
+  }
 
   const importedPayload = readImportedEmployeesPayload();
   const importedIndex = findImportedEmployeeIndex(importedPayload.items, id);
@@ -1776,7 +1837,7 @@ async function hrEmployeeCv(req, res, employeeId) {
   const context = await requireAuth(req, res, "employees.manage");
   if (!context) return;
 
-  const record = findEmployeeCvRecord(employeeId);
+  const record = await findEmployeeCvRecord(employeeId);
   if (!record?.cv_stored_name) return sendError(res, 404, "No CV file is attached");
   const filePath = candidateCvPath(record.cv_stored_name);
   if (!filePath || !fs.existsSync(filePath)) return sendError(res, 404, "CV file was not found");
@@ -1800,7 +1861,7 @@ async function hrEmployeeCvPreview(req, res, employeeId) {
   const context = await requireAuth(req, res, "employees.manage");
   if (!context) return;
 
-  const record = findEmployeeCvRecord(employeeId);
+  const record = await findEmployeeCvRecord(employeeId);
   if (!record?.cv_stored_name) return sendError(res, 404, "No CV file is attached");
   const filePath = candidateCvPath(record.cv_stored_name);
   if (!filePath || !fs.existsSync(filePath)) return sendError(res, 404, "CV file was not found");
@@ -2230,6 +2291,27 @@ async function importEmployeesCommit(req, res) {
     failed: draft.failedRows.length
   };
   const failedRows = [...draft.failedRows];
+
+  if (await shouldUsePersistentHrEmployees()) {
+    for (const record of draft.records) {
+      try {
+        const result = await employeeStore.saveUploadedEmployee(record, draft.source);
+        if (result.created) summary.created += 1;
+        else summary.updated += 1;
+        await writeEmployeeAudit(result.employee, context, result.created ? "created" : "edited");
+      } catch (error) {
+        summary.failed += 1;
+        failedRows.push({ rowNumber: record.rowNumber, reasons: [error.message] });
+      }
+    }
+    candidateImportDrafts.delete(String(body.importId || ""));
+    audit(req, context.user.id, "Employee Import Commit", { ...summary, source: draft.source }, "hr_employee_records");
+    return sendJson(res, 200, {
+      success: true,
+      summary,
+      failedRows
+    });
+  }
 
   for (let index = 0; index < draft.records.length; index += 500) {
     const batch = draft.records.slice(index, index + 500);
