@@ -1486,12 +1486,14 @@ function renderImportPreview(payload) {
   const summary = payload.summary || {};
   document.querySelector("[data-import-summary]").innerHTML = `
     <article><strong>${summary.totalRows || 0}</strong><span>Total rows</span></article>
-    <article><strong>${summary.validRows || 0}</strong><span>Valid rows</span></article>
-    <article><strong>${summary.failed || 0}</strong><span>Failed rows</span></article>
+    <article><strong>${summary.createCount || 0}</strong><span>Create</span></article>
+    <article><strong>${summary.updateCount || 0}</strong><span>Update</span></article>
+    <article><strong>${summary.duplicates || summary.duplicateCount || 0}</strong><span>Duplicates skipped</span></article>
+    <article><strong>${summary.invalid || summary.invalidCount || 0}</strong><span>Errors skipped</span></article>
   `;
 
   const rows = payload.preview || [];
-  const failedRows = payload.failedRows || [];
+  const skippedRows = payload.skippedRows || payload.failedRows || [];
   const employeeCards = rows.map(row => {
     const skills = employeeSkills(row.keywords);
     return `
@@ -1527,11 +1529,39 @@ function renderImportPreview(payload) {
     `;
   }).join("");
   document.querySelector("[data-import-preview]").innerHTML = `
-    <h3>Employee preview</h3>
-    <div class="import-preview-note">Showing ${escapeHtml(rows.length)} sample employees. Submit saves all ${escapeHtml(summary.validRows || 0)} valid rows.</div>
+    <h3>Upload preview</h3>
+    <div class="import-preview-note">
+      Showing ${escapeHtml(rows.length)} sample employees. Submit saves ${escapeHtml(summary.validRows || 0)} valid rows and skips ${escapeHtml(summary.skipped || 0)} duplicate/error rows.
+    </div>
     <div class="import-card-list">${employeeCards || `<div class="security-empty">No valid employee rows found.</div>`}</div>
+    ${skippedRows.length ? `
+      <h3>Rows skipped</h3>
+      <div class="failed-list">
+        ${skippedRows.slice(0, 20).map(row => `<p><b>Row ${escapeHtml(row.rowNumber)}</b> ${escapeHtml((row.reasons || []).join(", "))}</p>`).join("")}
+      </div>
+    ` : ""}
+  `;
+}
+
+function renderImportCommitResult(payload) {
+  const summary = payload.summary || {};
+  const failedRows = payload.failedRows || [];
+  const duplicateRows = payload.duplicateRows || [];
+  document.querySelector("[data-import-summary]").innerHTML = `
+    <article><strong>${summary.created || 0}</strong><span>Inserted</span></article>
+    <article><strong>${summary.updated || 0}</strong><span>Updated</span></article>
+    <article><strong>${summary.duplicates || summary.duplicateCount || duplicateRows.length || 0}</strong><span>Duplicates skipped</span></article>
+    <article><strong>${summary.invalid || summary.invalidCount || 0}</strong><span>Errors skipped</span></article>
+  `;
+  document.querySelector("[data-import-preview]").innerHTML = `
+    <h3>Database update complete</h3>
+    <div class="import-preview-note">
+      ${escapeHtml(payload.message || "Employees uploaded successfully and saved in database.")}
+      ${payload.importId ? ` Import #${escapeHtml(payload.importId)} saved.` : ""}
+      All valid employee records have been saved to the database.
+    </div>
     ${failedRows.length ? `
-      <h3>Rows needing fix</h3>
+      <h3>Rows not saved</h3>
       <div class="failed-list">
         ${failedRows.slice(0, 12).map(row => `<p><b>Row ${escapeHtml(row.rowNumber)}</b> ${escapeHtml((row.reasons || []).join(", "))}</p>`).join("")}
       </div>
@@ -1569,9 +1599,9 @@ function resetImportProgress() {
 
 function startImportProgress(submit) {
   stopImportProgress();
-  let percent = 0;
+  let percent = 1;
   setImportProgress(percent);
-  if (submit) submit.textContent = "Submitting 0%";
+  if (submit) submit.textContent = "Submitting 1%";
   importCommitProgressTimer = setInterval(() => {
     percent = Math.min(95, percent + Math.max(1, Math.ceil((96 - percent) * 0.08)));
     setImportProgress(percent);
@@ -1612,7 +1642,7 @@ function bindCandidateImport() {
       const payload = await apiUpload("/api/import/employees/preview", formData);
       state.candidateImportId = payload.importId;
       renderImportPreview(payload);
-      document.querySelector("[data-commit-import]").disabled = false;
+      document.querySelector("[data-commit-import]").disabled = !(payload.summary?.validRows > 0);
       status.textContent = "Preview ready. Review the employees, then submit to database.";
       status.className = "notice ok";
     } catch (error) {
@@ -1636,9 +1666,13 @@ function bindCandidateImport() {
         body: { importId: state.candidateImportId }
       });
       await finishImportProgress(submit);
+      renderImportCommitResult(payload);
       const summary = payload.summary;
-      state.hrImportConfirmation = `${summary.created} created, ${summary.updated} updated, ${summary.failed} failed`;
+      state.hrImportConfirmation = `${summary.created} inserted, ${summary.updated} updated, ${summary.duplicates || summary.duplicateCount || 0} duplicate rows skipped, ${summary.invalid || summary.invalidCount || 0} invalid rows skipped`;
       state.candidateImportId = "";
+      status.textContent = "Employees uploaded successfully. Database updated and employee list is refreshing.";
+      status.className = "notice ok";
+      await new Promise(resolve => setTimeout(resolve, 900));
       document.querySelector(".import-backdrop")?.remove();
       if (window.location.pathname !== "/hr/dashboard") {
         history.pushState({}, "", "/hr/dashboard");

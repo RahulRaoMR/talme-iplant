@@ -1275,9 +1275,10 @@ async function parseMultipartForm(req) {
 
     const name = headers.match(/name="([^"]+)"/i)?.[1];
     const filename = headers.match(/filename="([^"]*)"/i)?.[1];
+    const contentType = headers.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase() || "";
     const buffer = body.slice(headerEnd + 4, contentEnd);
     if (name && filename) {
-      files[name] = { filename, buffer };
+      files[name] = { filename, contentType, buffer };
     } else if (name) {
       fields[name] = buffer.toString("utf8");
     }
@@ -1339,6 +1340,20 @@ function parseCandidateWorkbook(file) {
   const extension = path.extname(file.filename).toLowerCase();
   if (![".xlsx", ".xls", ".csv"].includes(extension)) {
     const error = new Error("Only .xlsx, .xls, and .csv files are allowed");
+    error.statusCode = 400;
+    throw error;
+  }
+  const allowedTypes = new Set([
+    "",
+    "application/octet-stream",
+    "text/csv",
+    "application/csv",
+    "text/plain",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  ]);
+  if (file.contentType && !allowedTypes.has(file.contentType)) {
+    const error = new Error("Uploaded file type is not allowed");
     error.statusCode = 400;
     throw error;
   }
@@ -2027,7 +2042,7 @@ function buildEmployeeImportRecord(raw, rowNumber) {
     experience: Number.isNaN(experience) ? null : experience,
     currentCompany: trimCell(raw.currentCompany) || null,
     currentDesignation: trimCell(raw.currentDesignation) || "Employee",
-    employeeCode: trimCell(raw.employeeCode).match(/\d+/g)?.at(-1) || String(rowNumber).padStart(5, "0")
+    employeeCode: trimCell(raw.employeeCode) || String(rowNumber).padStart(5, "0")
   };
   const reasons = [];
   if (!record.fullName) reasons.push("name is required");
@@ -2038,6 +2053,18 @@ function buildEmployeeImportRecord(raw, rowNumber) {
     reasons.push("experience must be a positive number");
   }
   return { rowNumber, data: record, reasons };
+}
+
+function employeeImportIdentityKeys(data) {
+  return [
+    data.email ? `email:${data.email}` : null,
+    data.phone ? `phone:${data.phone}` : null,
+    data.employeeCode ? `employeeCode:${data.employeeCode}` : null
+  ].filter(Boolean);
+}
+
+function employeeImportDuplicateSignature(data) {
+  return employeeImportIdentityKeys(data).sort().join("|");
 }
 
 function parseEmployeeRows(rows) {
@@ -2059,8 +2086,10 @@ function parseEmployeeRows(rows) {
 
   const pushRecord = result => {
     totalRows += 1;
-    const key = `${result.data.email}|${result.data.phone}`;
-    if (!result.reasons.length && seen.has(key)) result.reasons.push("duplicate in uploaded file");
+    const duplicateSignature = employeeImportDuplicateSignature(result.data);
+    if (!result.reasons.length && duplicateSignature && seen.has(duplicateSignature)) {
+      result.reasons.push("duplicate in uploaded file");
+    }
     if (result.reasons.length) {
       failedRows.push({
         rowNumber: result.rowNumber,
@@ -2071,7 +2100,7 @@ function parseEmployeeRows(rows) {
       });
       return;
     }
-    seen.add(key);
+    if (duplicateSignature) seen.add(duplicateSignature);
     records.push({ rowNumber: result.rowNumber, data: result.data });
   };
 
@@ -2132,15 +2161,31 @@ function findEmployeeDuplicate(data) {
   return matches;
 }
 
-function previewEmployeeImport(records) {
-  return records.slice(0, 25).map(record => {
+async function previewEmployeeImport(records) {
+  if (await shouldUsePersistentHrEmployees()) {
+    return employeeStore.analyzeUploadedEmployees(records);
+  }
+  let createCount = 0;
+  let updateCount = 0;
+  const actions = records.map(record => {
     const duplicates = findEmployeeDuplicate(record.data);
+    if (duplicates.length) updateCount += 1;
+    else createCount += 1;
     return {
       rowNumber: record.rowNumber,
       action: duplicates.length ? "Update" : "Create",
       ...record.data
     };
   });
+  return { createCount, updateCount, actions, preview: actions.slice(0, 25) };
+}
+
+function duplicateImportRows(rows = []) {
+  return rows.filter(row => (row.reasons || []).some(reason => /duplicate/i.test(String(reason || ""))));
+}
+
+function invalidImportRows(rows = []) {
+  return rows.filter(row => !duplicateImportRows([row]).length);
 }
 
 async function importEmployeesPreview(req, res) {
@@ -2162,11 +2207,19 @@ async function importEmployeesPreview(req, res) {
     source: path.basename(file.filename)
   });
 
+  const duplicateRows = duplicateImportRows(parsed.failedRows);
+  const invalidRows = invalidImportRows(parsed.failedRows);
+  const analysis = await previewEmployeeImport(parsed.records);
+
   audit(req, context.user.id, "Employee Import Preview", {
     source: path.basename(file.filename),
     totalRows: parsed.totalRows,
     validRows: parsed.records.length,
-    failed: parsed.failedRows.length
+    failed: parsed.failedRows.length,
+    duplicates: duplicateRows.length,
+    invalid: invalidRows.length,
+    createCount: analysis.createCount,
+    updateCount: analysis.updateCount
   });
   sendJson(res, 200, {
     success: true,
@@ -2174,10 +2227,21 @@ async function importEmployeesPreview(req, res) {
     summary: {
       totalRows: parsed.totalRows,
       validRows: parsed.records.length,
-      failed: parsed.failedRows.length
+      createCount: analysis.createCount,
+      updateCount: analysis.updateCount,
+      failed: parsed.failedRows.length,
+      skipped: parsed.failedRows.length,
+      duplicates: duplicateRows.length,
+      duplicateCount: duplicateRows.length,
+      invalid: invalidRows.length,
+      invalidCount: invalidRows.length
     },
-    preview: previewEmployeeImport(parsed.records),
-    failedRows: parsed.failedRows
+    preview: analysis.preview,
+    actions: analysis.actions,
+    failedRows: parsed.failedRows,
+    skippedRows: parsed.failedRows,
+    duplicateRows,
+    invalidRows
   });
 }
 
@@ -2284,32 +2348,86 @@ async function importEmployeesCommit(req, res) {
     return sendError(res, 404, "Import preview expired. Please upload the file again.");
   }
 
+  if (!draft.records.length) {
+    const duplicateRows = duplicateImportRows(draft.failedRows);
+    const invalidRows = invalidImportRows(draft.failedRows);
+    candidateImportDrafts.delete(String(body.importId || ""));
+    return sendJson(res, 200, {
+      success: false,
+      message: "No valid employee rows to import.",
+      totalRows: draft.totalRows,
+      created: 0,
+      updated: 0,
+      duplicates: duplicateRows.length,
+      duplicateCount: duplicateRows.length,
+      failed: draft.failedRows.length,
+      invalid: invalidRows.length,
+      invalidCount: invalidRows.length,
+      skipped: draft.failedRows.length,
+      summary: {
+        totalRows: draft.totalRows,
+        validRows: 0,
+        created: 0,
+        updated: 0,
+        failed: draft.failedRows.length,
+        skipped: draft.failedRows.length,
+        duplicates: duplicateRows.length,
+        duplicateCount: duplicateRows.length,
+        invalid: invalidRows.length,
+        invalidCount: invalidRows.length
+      },
+      failedRows: draft.failedRows,
+      skippedRows: draft.failedRows,
+      duplicateRows,
+      invalidRows
+    });
+  }
+
   const summary = {
     totalRows: draft.totalRows,
+    validRows: draft.records.length,
     created: 0,
     updated: 0,
-    failed: draft.failedRows.length
+    failed: draft.failedRows.length,
+    skipped: draft.failedRows.length,
+    duplicates: duplicateImportRows(draft.failedRows).length,
+    duplicateCount: duplicateImportRows(draft.failedRows).length,
+    invalid: invalidImportRows(draft.failedRows).length,
+    invalidCount: invalidImportRows(draft.failedRows).length
   };
   const failedRows = [...draft.failedRows];
 
   if (await shouldUsePersistentHrEmployees()) {
-    for (const record of draft.records) {
-      try {
-        const result = await employeeStore.saveUploadedEmployee(record, draft.source);
-        if (result.created) summary.created += 1;
-        else summary.updated += 1;
-        await writeEmployeeAudit(result.employee, context, result.created ? "created" : "edited");
-      } catch (error) {
-        summary.failed += 1;
-        failedRows.push({ rowNumber: record.rowNumber, reasons: [error.message] });
-      }
+    const result = await employeeStore.saveUploadedEmployeesImport({
+      records: draft.records,
+      failedRows,
+      totalRows: draft.totalRows,
+      source: draft.source
+    });
+    Object.assign(summary, result.summary);
+    for (const saved of result.savedRows) {
+      await writeEmployeeAudit(saved.employee, context, saved.created ? "created" : "edited").catch(() => {});
     }
     candidateImportDrafts.delete(String(body.importId || ""));
-    audit(req, context.user.id, "Employee Import Commit", { ...summary, source: draft.source }, "hr_employee_records");
+    audit(req, context.user.id, "Employee Import Commit", { ...summary, source: draft.source, importId: result.importId }, "hr_employee_records");
     return sendJson(res, 200, {
       success: true,
+      message: "Employees uploaded successfully and saved in database.",
+      importId: result.importId,
+      totalRows: summary.totalRows,
+      created: summary.created,
+      updated: summary.updated,
+      duplicates: summary.duplicates,
+      duplicateCount: summary.duplicateCount || summary.duplicates,
+      failed: summary.failed,
+      invalid: summary.invalid,
+      invalidCount: summary.invalidCount || summary.invalid,
+      skipped: summary.skipped,
       summary,
-      failedRows
+      failedRows: result.failedRows,
+      skippedRows: result.failedRows,
+      duplicateRows: result.duplicateRows,
+      invalidRows: result.invalidRows
     });
   }
 
@@ -2324,10 +2442,16 @@ async function importEmployeesCommit(req, res) {
           if (result.updated) summary.updated += 1;
           if (result.failed) {
             summary.failed += 1;
+            summary.skipped += 1;
+            summary.invalid += 1;
+            summary.invalidCount += 1;
             failedRows.push({ rowNumber: record.rowNumber, reasons: [result.reason] });
           }
         } catch (error) {
           summary.failed += 1;
+          summary.skipped += 1;
+          summary.invalid += 1;
+          summary.invalidCount += 1;
           failedRows.push({ rowNumber: record.rowNumber, reasons: [error.message] });
         }
       }
@@ -2343,8 +2467,20 @@ async function importEmployeesCommit(req, res) {
   audit(req, context.user.id, "Employee Import Commit", { ...summary, source: draft.source }, "employee_accounts");
   sendJson(res, 200, {
     success: true,
+    totalRows: summary.totalRows,
+    created: summary.created,
+    updated: summary.updated,
+    duplicates: summary.duplicates,
+    duplicateCount: summary.duplicateCount,
+    failed: summary.failed,
+    invalid: summary.invalid,
+    invalidCount: summary.invalidCount,
+    skipped: summary.skipped,
     summary,
-    failedRows
+    failedRows,
+    skippedRows: failedRows,
+    duplicateRows: duplicateImportRows(failedRows),
+    invalidRows: invalidImportRows(failedRows)
   });
 }
 
