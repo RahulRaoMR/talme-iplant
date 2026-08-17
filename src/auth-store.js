@@ -11,111 +11,13 @@ const pool = databaseUrl
     })
   : null;
 
-let schemaReady;
-
-const requiredAuthColumns = {
-  auth_users: [
-    "id",
-    "full_name",
-    "email",
-    "phone",
-    "password_hash",
-    "role",
-    "created_at",
-    "updated_at",
-    "is_active"
-  ],
-  auth_sessions: [
-    "id",
-    "session_key",
-    "email",
-    "role",
-    "refresh_token_hash",
-    "csrf_token",
-    "remember_me",
-    "expires_at",
-    "last_seen_at",
-    "revoked_at",
-    "ip_address",
-    "user_agent",
-    "created_at"
-  ],
-  auth_password_otps: [
-    "id",
-    "auth_user_id",
-    "email",
-    "otp_hash",
-    "reset_token_hash",
-    "expires_at",
-    "reset_expires_at",
-    "verified_at",
-    "used_at",
-    "attempt_count",
-    "request_ip",
-    "user_agent",
-    "created_at"
-  ],
-  employee_record_audits: [
-    "record_key",
-    "employee_user_id",
-    "employee_email",
-    "employee_phone",
-    "created_by_auth_user_id",
-    "created_by_name",
-    "created_by_email",
-    "created_at",
-    "last_edited_by_auth_user_id",
-    "last_edited_by_name",
-    "last_edited_by_email",
-    "last_edited_at",
-    "last_action"
-  ]
-};
-
 function hasNeonAuth() {
   return Boolean(pool);
 }
 
 async function ensureAuthSchema() {
   if (!pool) return false;
-  if (!schemaReady) {
-    schemaReady = verifyAuthSchema();
-  }
-  await schemaReady;
   return true;
-}
-
-async function verifyAuthSchema() {
-  const tableNames = Object.keys(requiredAuthColumns);
-  const result = await pool.query(
-    `SELECT table_name, column_name
-     FROM information_schema.columns
-     WHERE table_schema = 'public'
-       AND table_name = ANY($1::text[])`,
-    [tableNames]
-  );
-  const columnsByTable = new Map();
-  for (const row of result.rows) {
-    if (!columnsByTable.has(row.table_name)) columnsByTable.set(row.table_name, new Set());
-    columnsByTable.get(row.table_name).add(row.column_name);
-  }
-  const missing = [];
-  for (const [tableName, columns] of Object.entries(requiredAuthColumns)) {
-    const found = columnsByTable.get(tableName);
-    if (!found) {
-      missing.push(`public.${tableName}`);
-      continue;
-    }
-    for (const column of columns) {
-      if (!found.has(column)) missing.push(`public.${tableName}.${column}`);
-    }
-  }
-  if (missing.length) {
-    const error = new Error(`Authentication database schema is not ready. Missing: ${missing.join(", ")}`);
-    error.statusCode = 500;
-    error.expose = true;
-    throw error;
-  }
 }
 
 function normalizeEmail(email) {

@@ -90,6 +90,10 @@ function sendError(res, statusCode, message, details) {
   sendJson(res, statusCode, { error: message, details });
 }
 
+function isDatabaseQuotaError(error) {
+  return /exceeded the data transfer quota/i.test(String(error?.message || ""));
+}
+
 function healthCheck(req, res) {
   sendJson(res, 200, {
     success: true,
@@ -2784,6 +2788,9 @@ async function requestHandler(req, res) {
     if (url.pathname.startsWith("/api/")) return sendError(res, 404, "API route not found");
     return serveStatic(req, res, url.pathname);
   } catch (error) {
+    if (isDatabaseQuotaError(error)) {
+      return sendError(res, 503, "Database access is temporarily unavailable: Neon data transfer quota exceeded.");
+    }
     const statusCode = error.statusCode || 500;
     if (statusCode >= 500 && !error.expose) console.error(error);
     sendError(res, statusCode, statusCode === 500 && !error.expose ? "Internal server error" : error.message);
