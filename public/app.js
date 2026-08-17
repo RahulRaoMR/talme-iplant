@@ -1347,6 +1347,10 @@ function employeeAddModal() {
               <input name="phone" inputmode="tel" autocomplete="tel" required>
             </label>
             <label class="field">
+              <span>employeeCode</span>
+              <input name="employeeCode" autocomplete="off">
+            </label>
+            <label class="field">
               <span>location</span>
               <input name="location" required>
             </label>
@@ -1374,7 +1378,7 @@ function employeeAddModal() {
           <p class="notice" data-add-employee-status></p>
           <div class="import-footer">
             <button class="btn" type="button" data-add-employee-close>Cancel</button>
-            <button class="btn primary" type="submit">${icon("plus")}Add employee</button>
+            <button class="btn primary" type="submit">Submit</button>
           </div>
         </form>
       </section>
@@ -1736,23 +1740,37 @@ function bindEmployeeAdd() {
   const form = document.querySelector("[data-add-employee-form]");
   form?.addEventListener("submit", async event => {
     event.preventDefault();
+    if (!form.reportValidity()) return;
     const status = document.querySelector("[data-add-employee-status]");
     const submit = form.querySelector('button[type="submit"]');
-    status.textContent = "Saving employee...";
+    status.textContent = "Submitting employee...";
     status.className = "notice";
     submit.disabled = true;
+    submit.textContent = "Submitting...";
     try {
       const payload = await apiUpload("/api/hr/employees", new FormData(form));
-      status.textContent = payload.message || "Employee added successfully.";
+      status.textContent = payload.message || "Employee saved successfully.";
       status.className = "notice ok";
+      submit.textContent = "Saved";
       form.reset();
+      state.hrImportConfirmation = "Employee saved successfully.";
+      if (window.location.pathname !== "/hr/dashboard") {
+        history.pushState({}, "", "/hr/dashboard");
+        renderHrDashboard(document.querySelector("#app"));
+      }
       await loadHrEmployees();
       document.querySelector(".employee-add-backdrop")?.remove();
     } catch (error) {
       status.textContent = error.message;
       status.className = "notice error";
-    } finally {
+      submit.textContent = "Submit";
       submit.disabled = false;
+      return;
+    } finally {
+      if (document.body.contains(submit)) {
+        submit.disabled = false;
+        submit.textContent = "Submit";
+      }
     }
   });
 }

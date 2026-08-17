@@ -198,24 +198,26 @@ async function matchingNonImportedRecord(client, email, phone, employeeCode = nu
   return result.rows[0] || null;
 }
 
-async function matchingUploadRecord(client, email, phone, employeeCode = null) {
+async function matchingUploadRecord(client, email, phone, employeeCode = null, recordKey = null) {
   const result = await client.query(`
-    SELECT record_key, source_id
+    SELECT record_key, source_id, employee_code
     FROM hr_employee_records
     WHERE archived_at IS NULL
       AND (
-        ($1::text IS NOT NULL AND $1 <> '' AND LOWER(email) = LOWER($1))
+        ($4::text IS NOT NULL AND $4 <> '' AND record_key = $4)
+        OR ($1::text IS NOT NULL AND $1 <> '' AND LOWER(email) = LOWER($1))
         OR ($2::text IS NOT NULL AND $2 <> '' AND phone = $2)
         OR ($3::text IS NOT NULL AND $3 <> '' AND employee_code = $3)
       )
     ORDER BY CASE
-      WHEN LOWER(email) = LOWER($1) THEN 0
-      WHEN phone = $2 THEN 1
-      WHEN employee_code = $3 THEN 2
-      ELSE 3
+      WHEN record_key = $4 THEN 0
+      WHEN LOWER(email) = LOWER($1) THEN 1
+      WHEN phone = $2 THEN 2
+      WHEN employee_code = $3 THEN 3
+      ELSE 4
     END, id
     LIMIT 1
-  `, [normalizeEmail(email) || null, normalizeText(phone), normalizeText(employeeCode)]);
+  `, [normalizeEmail(email) || null, normalizeText(phone), normalizeText(employeeCode), normalizeText(recordKey)]);
   return result.rows[0] || null;
 }
 
@@ -582,13 +584,22 @@ async function saveManualEmployee({ record, body, cv }) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const existing = await matchingNonImportedRecord(client, record.email, record.phone);
+    const employeeCode = normalizeText(body.employeeCode || body.employee_code);
+    const recordKey = normalizeText(body.recordKey || body.record_key);
+    const identity = {
+      recordKey,
+      email: record.email,
+      phone: record.phone,
+      employeeCode
+    };
+    await lockUploadIdentities(client, identity);
+    const existing = await matchingUploadRecord(client, record.email, record.phone, employeeCode, recordKey);
     const sourceId = existing?.source_id || `manual-${Date.now()}`;
     const saved = await upsertEmployeeRecord(client, {
-      recordKey: existing?.record_key || `manual:${sourceId}`,
+      recordKey: existing?.record_key || recordKey || `manual:${sourceId}`,
       sourceType: "manual",
       sourceId,
-      employeeCode: body.employeeCode || `EMP-${sourceId}`,
+      employeeCode: employeeCode || existing?.employee_code || `EMP-${sourceId}`,
       name: record.fullName,
       email: record.email,
       phone: record.phone,

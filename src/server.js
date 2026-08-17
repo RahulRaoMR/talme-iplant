@@ -1111,7 +1111,9 @@ async function createEmployee(req, res) {
     }, "hr_employee_record", auditedEmployee.id);
     return sendJson(res, saved.created ? 201 : 200, {
       success: true,
-      message: saved.created ? "Employee added successfully" : "Employee updated successfully",
+      message: "Employee saved successfully.",
+      created: Boolean(saved.created),
+      updated: !saved.created,
       employee: employeeResponse(auditedEmployee)
     });
   }

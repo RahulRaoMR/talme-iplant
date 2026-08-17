@@ -13,6 +13,65 @@ const pool = databaseUrl
 
 let schemaReady;
 
+const requiredAuthColumns = {
+  auth_users: [
+    "id",
+    "full_name",
+    "email",
+    "phone",
+    "password_hash",
+    "role",
+    "created_at",
+    "updated_at",
+    "is_active"
+  ],
+  auth_sessions: [
+    "id",
+    "session_key",
+    "email",
+    "role",
+    "refresh_token_hash",
+    "csrf_token",
+    "remember_me",
+    "expires_at",
+    "last_seen_at",
+    "revoked_at",
+    "ip_address",
+    "user_agent",
+    "created_at"
+  ],
+  auth_password_otps: [
+    "id",
+    "auth_user_id",
+    "email",
+    "otp_hash",
+    "reset_token_hash",
+    "expires_at",
+    "reset_expires_at",
+    "verified_at",
+    "used_at",
+    "attempt_count",
+    "request_ip",
+    "user_agent",
+    "created_at"
+  ],
+  employee_record_audits: [
+    "record_key",
+    "employee_user_id",
+    "employee_email",
+    "employee_phone",
+    "created_by_auth_user_id",
+    "created_by_name",
+    "created_by_email",
+    "created_at",
+    "last_edited_by_auth_user_id",
+    "last_edited_by_name",
+    "last_edited_by_email",
+    "last_edited_at",
+    "last_action"
+  ]
+};
+
 function hasNeonAuth() {
   return Boolean(pool);
 }
@@ -20,93 +79,43 @@ function hasNeonAuth() {
 async function ensureAuthSchema() {
   if (!pool) return false;
   if (!schemaReady) {
-    schemaReady = pool.query(`
-      CREATE TABLE IF NOT EXISTS auth_users (
-        id BIGSERIAL PRIMARY KEY,
-        full_name TEXT NOT NULL,
-        email TEXT NOT NULL,
-        phone TEXT NOT NULL,
-        password_hash TEXT NOT NULL,
-        role TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        is_active BOOLEAN NOT NULL DEFAULT TRUE
-      );
-
-      DROP INDEX IF EXISTS auth_users_email_lower_unique;
-
-      CREATE UNIQUE INDEX IF NOT EXISTS auth_users_email_role_lower_unique
-        ON auth_users (LOWER(email), role);
-
-      CREATE TABLE IF NOT EXISTS auth_sessions (
-        id BIGSERIAL PRIMARY KEY,
-        session_key TEXT NOT NULL UNIQUE,
-        email TEXT NOT NULL,
-        role TEXT,
-        refresh_token_hash TEXT NOT NULL UNIQUE,
-        csrf_token TEXT NOT NULL,
-        remember_me BOOLEAN NOT NULL DEFAULT FALSE,
-        expires_at TIMESTAMPTZ NOT NULL,
-        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        revoked_at TIMESTAMPTZ,
-        ip_address TEXT,
-        user_agent TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      CREATE INDEX IF NOT EXISTS auth_sessions_email_active_idx
-        ON auth_sessions (LOWER(email), revoked_at, expires_at);
-
-      ALTER TABLE auth_sessions
-        ADD COLUMN IF NOT EXISTS role TEXT;
-
-      CREATE TABLE IF NOT EXISTS auth_password_otps (
-        id BIGSERIAL PRIMARY KEY,
-        auth_user_id BIGINT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
-        email TEXT NOT NULL,
-        otp_hash TEXT NOT NULL,
-        reset_token_hash TEXT,
-        expires_at TIMESTAMPTZ NOT NULL,
-        reset_expires_at TIMESTAMPTZ,
-        verified_at TIMESTAMPTZ,
-        used_at TIMESTAMPTZ,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        request_ip TEXT,
-        user_agent TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      ALTER TABLE auth_password_otps
-        ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
-
-      CREATE INDEX IF NOT EXISTS auth_password_otps_user_active_idx
-        ON auth_password_otps (auth_user_id, used_at, expires_at);
-
-      CREATE INDEX IF NOT EXISTS auth_password_otps_email_created_idx
-        ON auth_password_otps (LOWER(email), created_at);
-
-      CREATE TABLE IF NOT EXISTS employee_record_audits (
-        record_key TEXT PRIMARY KEY,
-        employee_user_id TEXT,
-        employee_email TEXT,
-        employee_phone TEXT,
-        created_by_auth_user_id BIGINT REFERENCES auth_users(id) ON DELETE SET NULL,
-        created_by_name TEXT NOT NULL,
-        created_by_email TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        last_edited_by_auth_user_id BIGINT REFERENCES auth_users(id) ON DELETE SET NULL,
-        last_edited_by_name TEXT NOT NULL,
-        last_edited_by_email TEXT,
-        last_edited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        last_action TEXT NOT NULL DEFAULT 'created'
-      );
-
-      CREATE INDEX IF NOT EXISTS employee_record_audits_employee_email_idx
-        ON employee_record_audits (LOWER(employee_email));
-    `);
+    schemaReady = verifyAuthSchema();
   }
   await schemaReady;
   return true;
+}
+
+async function verifyAuthSchema() {
+  const tableNames = Object.keys(requiredAuthColumns);
+  const result = await pool.query(
+    `SELECT table_name, column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = ANY($1::text[])`,
+    [tableNames]
+  );
+  const columnsByTable = new Map();
+  for (const row of result.rows) {
+    if (!columnsByTable.has(row.table_name)) columnsByTable.set(row.table_name, new Set());
+    columnsByTable.get(row.table_name).add(row.column_name);
+  }
+  const missing = [];
+  for (const [tableName, columns] of Object.entries(requiredAuthColumns)) {
+    const found = columnsByTable.get(tableName);
+    if (!found) {
+      missing.push(`public.${tableName}`);
+      continue;
+    }
+    for (const column of columns) {
+      if (!found.has(column)) missing.push(`public.${tableName}.${column}`);
+    }
+  }
+  if (missing.length) {
+    const error = new Error(`Authentication database schema is not ready. Missing: ${missing.join(", ")}`);
+    error.statusCode = 500;
+    error.expose = true;
+    throw error;
+  }
 }
 
 function normalizeEmail(email) {

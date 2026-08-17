@@ -44,6 +44,19 @@ body {
   line-height: 1.5;
 }
 
+body,
+body * {
+  caret-color: transparent;
+}
+
+input,
+textarea,
+select,
+[contenteditable="true"],
+[contenteditable="true"] * {
+  caret-color: auto;
+}
+
 button,
 input,
 select {
