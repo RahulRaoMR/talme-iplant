@@ -23,8 +23,17 @@ async function hasEmployeeTables() {
     employeeTablesReady = pool.query(`
       SELECT
         to_regclass('public.hr_employee_records') IS NOT NULL AS has_records,
-        to_regclass('public.hr_employee_imports') IS NOT NULL AS has_imports
-    `).then(result => Boolean(result.rows[0]?.has_records && result.rows[0]?.has_imports));
+        to_regclass('public.hr_employee_imports') IS NOT NULL AS has_imports,
+        to_regclass('public.hr_employee_resumes') IS NOT NULL AS has_resumes,
+        to_regclass('public.skills') IS NOT NULL AS has_skills,
+        to_regclass('public.employee_skills') IS NOT NULL AS has_employee_skills
+    `).then(result => Boolean(
+      result.rows[0]?.has_records
+      && result.rows[0]?.has_imports
+      && result.rows[0]?.has_resumes
+      && result.rows[0]?.has_skills
+      && result.rows[0]?.has_employee_skills
+    ));
   }
   return employeeTablesReady;
 }
@@ -67,6 +76,7 @@ function rowToEmployee(row) {
   if (!row) return null;
   return {
     id: row.source_id,
+    record_db_id: row.id == null ? null : Number(row.id),
     employee_code: row.employee_code,
     name: row.name,
     email: row.email || "",
@@ -80,6 +90,17 @@ function rowToEmployee(row) {
     current_designation: row.current_designation,
     cv_file_name: row.cv_file_name,
     cv_stored_name: row.cv_stored_name,
+    resume_s3_key: row.resume_s3_key,
+    latest_resume: row.resume_id ? {
+      id: Number(row.resume_id),
+      file_name: row.resume_file_name,
+      file_path: row.resume_file_path,
+      file_url: row.resume_file_url,
+      storage_provider: row.resume_storage_provider,
+      uploaded_at: row.resume_uploaded_at
+    } : null,
+    skills: Array.isArray(row.skills) ? row.skills.filter(Boolean) : [],
+    matched_skills: Array.isArray(row.matched_skills) ? row.matched_skills.filter(Boolean) : [],
     source: row.source_file,
     rowNumber: row.row_number,
     updatedAt: row.source_updated_at || row.updated_at
@@ -92,8 +113,188 @@ const employeeSelect = `
   local_role_company_id, employee_code, name, email, phone, status,
   email_verified, phone_verified, designation, department, location, keywords,
   experience, current_company, current_designation, cv_file_name, cv_stored_name,
-  source_created_at, source_updated_at, created_at, updated_at
+  resume_s3_key, source_created_at, source_updated_at, created_at, updated_at
 `;
+
+const employeeSearchSelect = `
+  e.id, e.record_key, e.source_type, e.source_id, e.source_file, e.row_number,
+  e.import_id, e.local_user_id, e.local_employee_account_id, e.local_company_id, e.local_role_id,
+  e.local_role_company_id, e.employee_code, e.name, e.email, e.phone, e.status,
+  e.email_verified, e.phone_verified, e.designation, e.department, e.location, e.keywords,
+  e.experience, e.current_company, e.current_designation, e.cv_file_name, e.cv_stored_name,
+  e.resume_s3_key, e.source_created_at, e.source_updated_at, e.created_at, e.updated_at,
+  latest_resume.id AS resume_id,
+  latest_resume.file_name AS resume_file_name,
+  latest_resume.file_path AS resume_file_path,
+  latest_resume.file_url AS resume_file_url,
+  latest_resume.storage_provider AS resume_storage_provider,
+  latest_resume.uploaded_at AS resume_uploaded_at,
+  COALESCE(skill_set.skills, ARRAY[]::text[]) AS skills
+`;
+
+function parsePagination(query = {}) {
+  const page = Math.max(Number(query.page) || 1, 1);
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 100);
+  return { page, limit, offset: (page - 1) * limit };
+}
+
+function normalizeSkillName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9+#.\s-]/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function skillNamesFromKeywords(keywords) {
+  return [...new Set(
+    String(keywords || "")
+      .split(/[,\n;|/]+/)
+      .map(normalizeSkillName)
+      .filter(Boolean)
+  )];
+}
+
+function searchTerms(query) {
+  const normalized = normalizeSkillName(query);
+  const parts = normalized.split(/\s+/).filter(Boolean);
+  return [...new Set([normalized, ...parts].filter(Boolean))];
+}
+
+async function replaceEmployeeSkills(client, employeeRecordId, resumeId, keywords) {
+  if (!employeeRecordId) return;
+  const names = skillNamesFromKeywords(keywords);
+  await client.query("DELETE FROM employee_skills WHERE employee_record_id = $1", [employeeRecordId]);
+  if (!names.length) return;
+
+  const skillResult = await client.query(`
+    INSERT INTO skills (skill_name, normalized_name)
+    SELECT initcap(value), value
+    FROM unnest($1::text[]) AS value
+    ON CONFLICT (normalized_name) DO UPDATE SET skill_name = EXCLUDED.skill_name
+    RETURNING id, normalized_name
+  `, [names]);
+  const skillIds = new Map(skillResult.rows.map(row => [row.normalized_name, row.id]));
+
+  for (const name of names) {
+    const skillId = skillIds.get(name);
+    if (!skillId) continue;
+    await client.query(`
+      INSERT INTO employee_skills (employee_record_id, skill_id, resume_id)
+      VALUES ($1, $2, $3)
+      ON CONFLICT DO NOTHING
+    `, [employeeRecordId, skillId, resumeId || null]);
+  }
+}
+
+async function upsertLatestResume(client, employeeRecordId, cv) {
+  if (!employeeRecordId || (!cv?.cvFileName && !cv?.cvStoredName && !cv?.extractedText)) return null;
+  await client.query(`
+    UPDATE hr_employee_resumes
+    SET is_latest = FALSE, updated_at = NOW()
+    WHERE employee_record_id = $1 AND is_latest = TRUE
+  `, [employeeRecordId]);
+  const result = await client.query(`
+    INSERT INTO hr_employee_resumes (
+      employee_record_id, file_name, file_path, storage_provider, storage_key,
+      extracted_text, is_latest, uploaded_at
+    )
+    VALUES ($1, $2, $3, 'local', $3, $4, TRUE, NOW())
+    RETURNING id
+  `, [
+    employeeRecordId,
+    normalizeText(cv.cvFileName),
+    normalizeText(cv.cvStoredName),
+    normalizeText(cv.extractedText)
+  ]);
+  return result.rows[0]?.id || null;
+}
+
+async function latestResumeId(client, employeeRecordId) {
+  const result = await client.query(`
+    SELECT id
+    FROM hr_employee_resumes
+    WHERE employee_record_id = $1 AND is_latest = TRUE
+    ORDER BY uploaded_at DESC, id DESC
+    LIMIT 1
+  `, [employeeRecordId]);
+  return result.rows[0]?.id || null;
+}
+
+async function searchEmployees(query = {}) {
+  await requireEmployeeTables();
+  const { page, limit, offset } = parsePagination(query);
+  const q = normalizeText(query.q || query.search || query.keyword) || "";
+  const like = `%${q.toLowerCase()}%`;
+  const terms = searchTerms(q);
+  const where = ["e.archived_at IS NULL"];
+
+  if (q) {
+    where.push(`(
+      to_tsvector('simple', concat_ws(' ', e.name, e.email, e.phone, e.employee_code, e.designation, e.department, e.location, e.keywords, e.current_company, e.current_designation)) @@ websearch_to_tsquery('simple', $1)
+      OR latest_resume.search_vector @@ websearch_to_tsquery('english', $1)
+      OR LOWER(concat_ws(' ', e.name, e.email, e.phone, e.employee_code, e.designation, e.department, e.location, e.keywords, e.current_company, e.current_designation)) LIKE $2
+      OR EXISTS (
+        SELECT 1
+        FROM employee_skills employee_skill_match
+        JOIN skills skill_match ON skill_match.id = employee_skill_match.skill_id
+        WHERE employee_skill_match.employee_record_id = e.id
+          AND (skill_match.normalized_name = ANY($3::text[]) OR skill_match.normalized_name ILIKE $2)
+      )
+    )`);
+  }
+
+  const result = await pool.query(`
+    SELECT ${employeeSearchSelect},
+      COALESCE(skill_set.matched_skills, ARRAY[]::text[]) AS matched_skills,
+      COUNT(*) OVER() AS total_count,
+      CASE WHEN $1 <> '' THEN
+        ts_rank_cd(
+          to_tsvector('simple', concat_ws(' ', e.name, e.email, e.phone, e.employee_code, e.designation, e.department, e.location, e.keywords, e.current_company, e.current_designation)),
+          websearch_to_tsquery('simple', $1)
+        )
+        + COALESCE(ts_rank_cd(latest_resume.search_vector, websearch_to_tsquery('english', $1)), 0)
+      ELSE 0 END AS search_rank
+    FROM hr_employee_records e
+    LEFT JOIN LATERAL (
+      SELECT resume.*
+      FROM hr_employee_resumes resume
+      WHERE resume.employee_record_id = e.id AND resume.is_latest = TRUE
+      ORDER BY resume.uploaded_at DESC, resume.id DESC
+      LIMIT 1
+    ) latest_resume ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        COALESCE(array_agg(DISTINCT skill.skill_name) FILTER (WHERE skill.skill_name IS NOT NULL), ARRAY[]::text[]) AS skills,
+        COALESCE(
+          array_agg(DISTINCT skill.skill_name) FILTER (
+            WHERE $1 <> ''
+              AND skill.skill_name IS NOT NULL
+              AND (skill.normalized_name = ANY($3::text[]) OR skill.normalized_name ILIKE $2)
+          ),
+          ARRAY[]::text[]
+        ) AS matched_skills
+      FROM employee_skills employee_skill
+      JOIN skills skill ON skill.id = employee_skill.skill_id
+      WHERE employee_skill.employee_record_id = e.id
+        AND (employee_skill.resume_id IS NULL OR latest_resume.id IS NULL OR employee_skill.resume_id = latest_resume.id)
+    ) skill_set ON TRUE
+    WHERE ${where.join(" AND ")}
+    ORDER BY search_rank DESC, e.name ASC, e.id ASC
+    LIMIT $4 OFFSET $5
+  `, [q, like, terms, limit, offset]);
+
+  const total = Number(result.rows[0]?.total_count || 0);
+  return {
+    items: result.rows.map(rowToEmployee),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit)
+    }
+  };
+}
 
 async function listEmployees() {
   await requireEmployeeTables();
@@ -355,6 +556,7 @@ async function upsertEmployeeRecord(client, record, importId = null) {
   return {
     employee: rowToEmployee(row),
     created: Boolean(row?.inserted),
+    recordId: row?.id,
     recordKey: row?.record_key,
     sourceId: row?.source_id,
     email: row?.email,
@@ -550,6 +752,7 @@ async function saveUploadedEmployeesImport({ records, failedRows = [], totalRows
         const existing = matchingUploadIdentity(identityMap, record)
           || await matchingUploadRecord(client, record.data.email, record.data.phone, record.data.employeeCode);
         const saved = await upsertEmployeeRecord(client, uploadedEmployeePayload(record, source, existing), importId);
+        await replaceEmployeeSkills(client, saved.recordId, await latestResumeId(client, saved.recordId), record.data.keywords);
         if (saved.created) summary.created += 1;
         else summary.updated += 1;
         savedRows.push(saved);
@@ -618,6 +821,8 @@ async function saveManualEmployee({ record, body, cv }) {
       sourceUpdatedAt: new Date().toISOString(),
       sourcePayload: { body }
     });
+    const resumeId = await upsertLatestResume(client, saved.recordId, cv) || await latestResumeId(client, saved.recordId);
+    await replaceEmployeeSkills(client, saved.recordId, resumeId, record.keywords);
     await client.query("COMMIT");
     return saved;
   } catch (error) {
@@ -689,8 +894,11 @@ async function updateEmployee(identifier, data, cv) {
       cv.cvFileName || null,
       cv.cvStoredName || null
     ]);
+    const updatedRow = result.rows[0];
+    const resumeId = await upsertLatestResume(client, updatedRow.id, cv) || await latestResumeId(client, updatedRow.id);
+    await replaceEmployeeSkills(client, updatedRow.id, resumeId, updatedRow.keywords);
     await client.query("COMMIT");
-    return rowToEmployee(result.rows[0]);
+    return rowToEmployee(updatedRow);
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     throw error;
@@ -707,6 +915,7 @@ async function saveUploadedEmployee(record, source) {
     await lockUploadIdentities(client, record);
     const existing = await matchingUploadRecord(client, record.data.email, record.data.phone, record.data.employeeCode);
     const saved = await upsertEmployeeRecord(client, uploadedEmployeePayload(record, source, existing));
+    await replaceEmployeeSkills(client, saved.recordId, await latestResumeId(client, saved.recordId), record.data.keywords);
     await client.query("COMMIT");
     return saved;
   } catch (error) {
@@ -726,6 +935,7 @@ module.exports = {
   hasEmployeeTables,
   listEmployees,
   listImportedEmployees,
+  searchEmployees,
   publicProfileCount,
   findEmployeeByIdentifier,
   analyzeUploadedEmployees,

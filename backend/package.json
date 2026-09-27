@@ -7,9 +7,11 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "check": "node --check src/server.js && node --check src/app.js"
+    "prisma:generate": "node scripts/prisma.js generate",
+    "prisma:migrate": "node scripts/prisma.js migrate dev",
+    "check": "node --check src/server.js && node --check src/app.js",
+    "prisma:deploy": "node scripts/prisma.js migrate deploy",
+    "prisma:validate": "node scripts/prisma.js validate"
   },
   "keywords": [
     "candidate-database",
@@ -32,6 +34,7 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
+    "pg": "^8.23.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

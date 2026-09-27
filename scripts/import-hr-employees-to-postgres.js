@@ -15,8 +15,8 @@ const databaseUrl = process.env.DATABASE_URL;
 
 function usage() {
   console.log("Usage:");
-  console.log("  node scripts/import-hr-employees-to-neon.js --dry-run");
-  console.log("  node scripts/import-hr-employees-to-neon.js --apply");
+  console.log("  node scripts/import-hr-employees-to-postgres.js --dry-run");
+  console.log("  node scripts/import-hr-employees-to-postgres.js --apply");
   console.log("");
   console.log("Default mode is --dry-run. DATABASE_URL is required for destination checks and --apply.");
 }
@@ -381,7 +381,7 @@ async function main() {
         destinationReady: false,
         destinationCheck: "unavailable",
         reason: error.code || error.name || "connection failed",
-        nextStep: "Run the Prisma migration and rerun this dry run from a shell that can connect to Neon."
+        nextStep: "Run the Prisma migration and rerun this dry run from a shell that can connect to PostgreSQL."
       }, null, 2));
       return;
     }

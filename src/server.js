@@ -31,8 +31,9 @@ const {
 } = require("./security");
 const { ROLE_REDIRECTS, DASHBOARD_PERMISSIONS } = require("./rbac");
 const {
-  hasNeonAuth,
+  hasPostgresAuth,
   findAuthUserByEmail,
+  findAuthUsersByEmail,
   createAuthUser,
   verifyAuthPassword,
   createAuthSession,
@@ -90,7 +91,7 @@ function sendError(res, statusCode, message, details) {
   sendJson(res, statusCode, { error: message, details });
 }
 
-function isDatabaseQuotaError(error) {
+function isDatabaseTransferQuotaError(error) {
   return /exceeded the data transfer quota/i.test(String(error?.message || ""));
 }
 
@@ -528,12 +529,13 @@ async function login(req, res) {
     return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
   }
 
-  if (!hasNeonAuth()) {
+  if (!hasPostgresAuth()) {
     return sendAuthFailure(res, 500, "Authentication database is not configured.");
   }
-  const authUser = await findAuthUserByEmail(email, requestedRole);
+  const authUsers = await findAuthUsersByEmail(email);
+  const authUser = authUsers.find(candidate => candidate.role === requestedRole) || null;
   if (!authUser) {
-    const anyRoleUser = await findAuthUserByEmail(email);
+    const anyRoleUser = authUsers[0] || null;
     logLogin(req, null, false, "Failed Login", anyRoleUser ? "Requested login role not registered" : "Account not found", email);
     return sendAuthFailure(res, anyRoleUser ? 403 : 404, anyRoleUser ? "This email is not registered for the selected login page." : "Account not found. Please register first.");
   }
@@ -588,7 +590,7 @@ async function register(req, res) {
   if (type === "employee" && body.inviteCode !== employeeInviteCode) {
     return sendAuthFailure(res, 403, "Employee registration is invite only");
   }
-  if (!hasNeonAuth()) {
+  if (!hasPostgresAuth()) {
     return sendAuthFailure(res, 500, "Authentication database is not configured.");
   }
   if (await findAuthUserByEmail(email, roleSlug)) {
@@ -609,11 +611,12 @@ async function forgotPassword(req, res) {
   if (!email) return sendAuthFailure(res, 400, "Email is required.");
   if (!roleSlug) return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
   if (!validEmail(email)) return sendAuthFailure(res, 400, "Please enter a valid email address.");
-  if (!hasNeonAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
+  if (!hasPostgresAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
 
-  const authUser = await findAuthUserByEmail(email, roleSlug);
+  const authUsers = await findAuthUsersByEmail(email);
+  const authUser = authUsers.find(candidate => candidate.role === roleSlug) || null;
   if (!authUser) {
-    const anyRoleUser = await findAuthUserByEmail(email);
+    const anyRoleUser = authUsers[0] || null;
     return sendAuthFailure(res, anyRoleUser ? 403 : 404, anyRoleUser ? "Email address is not registered for the selected login page." : "Email address is not registered.");
   }
 
@@ -658,7 +661,7 @@ async function verifyForgotPasswordOtp(req, res) {
   if (!roleSlug) return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
   if (!validEmail(email)) return sendAuthFailure(res, 400, "Please enter a valid email address.");
   if (!/^\d{6}$/.test(otp)) return sendAuthFailure(res, 400, "Invalid OTP.");
-  if (!hasNeonAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
+  if (!hasPostgresAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
 
   const resetToken = randomToken(32);
   const result = await verifyPasswordResetOtp({
@@ -702,7 +705,7 @@ async function resetPassword(req, res) {
   if (!validatePassword(password)) {
     return sendAuthFailure(res, 400, "Password must be at least 8 characters and include uppercase, lowercase, number, and special character.");
   }
-  if (!hasNeonAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
+  if (!hasPostgresAuth()) return sendAuthFailure(res, 500, "Authentication database is not configured.");
 
   const result = await resetAuthPasswordWithToken({
     email,
@@ -1079,6 +1082,89 @@ async function importedHrEmployees(req, res) {
   });
 }
 
+function serverSearchTokens(query) {
+  return String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function serverEmployeeSearchText(employee) {
+  return [
+    employee.name,
+    employee.email,
+    employee.phone,
+    employee.location,
+    employee.keywords,
+    employee.employee_code,
+    employee.designation,
+    employee.department,
+    employee.current_company,
+    employee.current_designation
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function serverEmployeeMatchesSearch(employee, query) {
+  const tokens = serverSearchTokens(query);
+  if (!tokens.length) return true;
+  const haystack = serverEmployeeSearchText(employee);
+  const phoneDigits = String(employee.phone || "").replace(/\D/g, "");
+  return tokens.every(token => {
+    const tokenDigits = token.replace(/\D/g, "");
+    return haystack.includes(token) || Boolean(tokenDigits && phoneDigits.includes(tokenDigits));
+  });
+}
+
+function paginateEmployees(items, query) {
+  const page = Math.max(Number(query.page) || 1, 1);
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 100);
+  const start = (page - 1) * limit;
+  return {
+    items: items.slice(start, start + limit),
+    pagination: {
+      page,
+      limit,
+      total: items.length,
+      totalPages: Math.ceil(items.length / limit)
+    }
+  };
+}
+
+async function searchHrEmployees(req, res) {
+  const context = await requireAuth(req, res, "employees.manage");
+  if (!context) return;
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const query = Object.fromEntries(url.searchParams.entries());
+
+  if (await shouldUsePersistentHrEmployees()) {
+    const result = await employeeStore.searchEmployees(query);
+    return sendJson(res, 200, {
+      items: await attachEmployeeAudits(result.items),
+      pagination: result.pagination
+    });
+  }
+
+  const localRows = db.prepare(`
+    SELECT u.id, ea.employee_code, u.name,
+           CASE WHEN lower(u.email) LIKE 'local-import-%@talme.local' THEN '' ELSE u.email END AS email,
+           u.phone, ea.designation, ea.department,
+           ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
+           ea.cv_file_name, ea.cv_stored_name
+    FROM employee_accounts ea
+    JOIN users u ON u.id = ea.user_id
+    JOIN user_roles ur ON ur.user_id = u.id
+    JOIN roles r ON r.id = ur.role_id
+    WHERE r.slug = 'employee'
+    ORDER BY u.name
+  `).all();
+  const importedPayload = readImportedEmployeesPayload();
+  const importedItems = (Array.isArray(importedPayload.items) ? importedPayload.items : []).map(item => ({
+    ...item,
+    source: item.source || "imported-employees.json"
+  }));
+  const items = [...importedItems, ...localRows]
+    .filter(employee => serverEmployeeMatchesSearch(employee, query.q || query.search || query.keyword || ""));
+  const paginated = paginateEmployees(await attachEmployeeAudits(items), query);
+  sendJson(res, 200, paginated);
+}
+
 function companyIdForUser(userId) {
   const employee = db.prepare("SELECT company_id FROM employee_accounts WHERE user_id = ? AND company_id IS NOT NULL").get(userId);
   if (employee?.company_id) return employee.company_id;
@@ -1438,10 +1524,20 @@ function saveCandidateCv(file) {
 
   const storedName = `${Date.now()}-${randomToken(8)}${extension}`;
   fs.mkdirSync(cvUploadDir, { recursive: true });
-  fs.writeFileSync(path.join(cvUploadDir, storedName), file.buffer);
+  const storedPath = path.join(cvUploadDir, storedName);
+  fs.writeFileSync(storedPath, file.buffer);
+  let extractedText = "";
+  if (extension === ".docx") {
+    try {
+      extractedText = extractDocxText(storedPath);
+    } catch {
+      extractedText = "";
+    }
+  }
   return {
     cvFileName: path.basename(file.filename),
-    cvStoredName: storedName
+    cvStoredName: storedName,
+    extractedText
   };
 }
 
@@ -1551,6 +1647,7 @@ async function publicProfileCount(req, res) {
     const counts = await employeeStore.publicProfileCount();
     return sendJson(res, 200, {
       success: true,
+      totalEmployees: counts.totalProfiles,
       totalProfiles: counts.totalProfiles,
       profiles: counts.totalProfiles,
       databaseProfiles: counts.databaseProfiles,
@@ -1564,6 +1661,7 @@ async function publicProfileCount(req, res) {
   const totalProfiles = mergedEmployeeProfileCount(dbItems, payload.items);
   sendJson(res, 200, {
     success: true,
+    totalEmployees: totalProfiles,
     totalProfiles,
     profiles: totalProfiles,
     databaseProfiles: dbItems.length,
@@ -1686,6 +1784,9 @@ function employeeResponse(record) {
     current_designation: record.current_designation,
     cv_file_name: record.cv_file_name,
     cv_stored_name: record.cv_stored_name,
+    latest_resume: record.latest_resume || null,
+    skills: Array.isArray(record.skills) ? record.skills : [],
+    matched_skills: Array.isArray(record.matched_skills) ? record.matched_skills : [],
     source: record.source,
     rowNumber: record.rowNumber,
     audit_action: record.audit_action,
@@ -2762,6 +2863,7 @@ const routes = {
   "GET /api/platform/companies": platformCompanies,
   "GET /api/hr/employees": hrEmployees,
   "GET /api/hr/imported-employees": importedHrEmployees,
+  "GET /api/hr/employees/search": searchHrEmployees,
   "POST /api/hr/employees": createEmployee,
   "GET /api/candidate/applications": candidateApplications
 };
@@ -2788,8 +2890,8 @@ async function requestHandler(req, res) {
     if (url.pathname.startsWith("/api/")) return sendError(res, 404, "API route not found");
     return serveStatic(req, res, url.pathname);
   } catch (error) {
-    if (isDatabaseQuotaError(error)) {
-      return sendError(res, 503, "Database access is temporarily unavailable: Neon data transfer quota exceeded.");
+    if (isDatabaseTransferQuotaError(error)) {
+      return sendError(res, 503, "Database access is temporarily unavailable: data transfer quota exceeded.");
     }
     const statusCode = error.statusCode || 500;
     if (statusCode >= 500 && !error.expose) console.error(error);

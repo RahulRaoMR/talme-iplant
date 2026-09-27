@@ -3,7 +3,7 @@ const { Readable } = require("node:stream");
 require("../src/load-env").loadLocalEnv();
 
 if (!process.env.DATABASE_URL) {
-  console.log("Employee audit test skipped: DATABASE_URL is required to verify Neon-backed employee audit persistence.");
+  console.log("Employee audit test skipped: DATABASE_URL is required to verify PostgreSQL-backed employee audit persistence.");
   process.exit(0);
 }
 
@@ -158,7 +158,7 @@ async function main() {
     assert(refreshedEmployee.audit_user_name === userB.name, "Expected persisted Last edited by User B after refresh");
     assert(refreshedEmployee.audit_at === editB.body.employee.audit_at, "Expected persisted User B edit timestamp after refresh");
 
-    console.log("Employee audit test passed: User A create/edit, User B edit, Neon-backed audit persisted after refresh.");
+    console.log("Employee audit test passed: User A create/edit, User B edit, PostgreSQL-backed audit persisted after refresh.");
   } finally {
     await deleteAuthUserByEmail(userA.email).catch(() => {});
     await deleteAuthUserByEmail(userB.email).catch(() => {});

@@ -28,6 +28,8 @@ module.exports = {
   isProductionRuntime,
   dbPath: process.env.DB_PATH || defaultDbPath,
   cvUploadDir: process.env.CV_UPLOAD_DIR || defaultCvUploadDir,
+  awsRegion: process.env.AWS_REGION || "",
+  awsS3Bucket: process.env.AWS_S3_BUCKET || "",
   publicDir: path.join(rootDir, "public"),
   employeeInviteCode: process.env.EMPLOYEE_INVITE_CODE || ""
 };

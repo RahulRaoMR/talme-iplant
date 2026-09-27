@@ -52,7 +52,7 @@ function assert(condition, message) {
 
 async function main() {
   if (!process.env.DATABASE_URL) {
-    console.log("Auth smoke test skipped: DATABASE_URL is required to verify Neon-backed authentication.");
+    console.log("Auth smoke test skipped: DATABASE_URL is required to verify PostgreSQL-backed authentication.");
     return;
   }
   ({ requestHandler } = require("../src/server"));

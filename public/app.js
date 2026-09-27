@@ -10,6 +10,7 @@ const state = {
   hrEmployees: [],
   hrEmployeeVisibleCount: 50,
   hrEmployeeSearchQuery: "",
+  hrEmployeePagination: { page: 1, limit: 50, total: 0, totalPages: 0 },
   hrShowDuplicates: false,
   expandedEmployeeSkills: new Set(),
   hrImportConfirmation: "",
@@ -68,6 +69,7 @@ let securityMonitorTimer = null;
 let importCommitProgressTimer = null;
 let hrEmployeesLiveTimer = null;
 let hrEmployeesLiveLoading = false;
+let hrEmployeeSearchTimer = null;
 
 document.body.classList.toggle("dark", state.theme === "dark");
 
@@ -346,7 +348,7 @@ function landing() {
                 <img src="/talme-logo.png" alt="Talme Technologies Pvt Ltd">
                 <div><strong>Talme Hiring Portal</strong><span>Talent search and HR workspace</span></div>
               </div>
-              <div class="shot-status" data-profile-count>${icon("users")} ${profileCountLabel()} profiles</div>
+              <div class="shot-status" data-profile-count>${icon("users")} ${profileCountLabel()} employees</div>
             </div>
             <div class="shot-body">
               <aside class="shot-sidebar">
@@ -448,10 +450,11 @@ async function loadPublicProfileCount() {
       credentials: "same-origin"
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok || typeof payload.totalProfiles !== "number") return;
-    state.profileCount = payload.totalProfiles;
+    const totalEmployees = payload.totalEmployees ?? payload.totalProfiles;
+    if (!response.ok || typeof totalEmployees !== "number") return;
+    state.profileCount = totalEmployees;
     localStorage.setItem("talme_profile_count", String(state.profileCount));
-    target.innerHTML = `${icon("users")} ${profileCountLabel()} profiles`;
+    target.innerHTML = `${icon("users")} ${profileCountLabel()} employees`;
   } catch {
   }
 }
@@ -696,6 +699,7 @@ function authNoticeMessage(error, fallback) {
   if (/invalid otp/i.test(message)) return "Invalid OTP.";
   if (/otp has expired/i.test(message)) return "OTP has expired. Please request a new OTP.";
   if (/email service is not configured/i.test(message)) return message;
+  if (/database access is temporarily unavailable|data transfer quota exceeded|authentication database is not configured/i.test(message)) return message;
   if (error?.status >= 500) return "Something went wrong. Please try again later.";
   return message || fallback || "Something went wrong. Please try again later.";
 }
@@ -1829,15 +1833,25 @@ function stopHrEmployeesLive() {
 }
 
 async function fetchHrEmployees() {
-  const [payload, importedPayload] = await Promise.all([
-    api("/api/hr/employees"),
-    api("/api/hr/imported-employees").catch(() => ({ items: [] }))
-  ]);
-  state.hrEmployees = mergeHrEmployeeLists(payload.items || [], importedPayload.items || []);
-  state.profileCount = state.hrEmployees.length;
+  const params = new URLSearchParams({
+    page: "1",
+    limit: String(state.hrEmployeeVisibleCount || 50)
+  });
+  const query = state.hrEmployeeSearchQuery.trim();
+  if (query) params.set("q", query);
+  const payload = await api(`/api/hr/employees/search?${params.toString()}`);
+  state.hrEmployees = payload.items || [];
+  state.hrEmployeePagination = payload.pagination || {
+    page: 1,
+    limit: state.hrEmployeeVisibleCount,
+    total: state.hrEmployees.length,
+    totalPages: 1
+  };
+  state.profileCount = state.hrEmployeePagination.total || state.hrEmployees.length;
   localStorage.setItem("talme_profile_count", String(state.profileCount));
   return state.hrEmployees;
 }
+
 
 function mergeHrEmployeeLists(importedItems, dbItems) {
   const merged = [];
@@ -1864,7 +1878,8 @@ function renderHrEmployees(items = state.hrEmployees) {
     target.innerHTML = `<div class="security-empty">No duplicate employee records found.</div>`;
     return;
   }
-  const matchedItems = query ? sourceItems.filter(employee => employeeMatchesSearch(employee, query)) : sourceItems;
+  const matchedItems = sourceItems;
+  const totalMatches = state.hrEmployeePagination?.total || matchedItems.length;
   if (!matchedItems.length) {
     target.innerHTML = `<div class="security-empty">No employees match "${escapeHtml(query)}".</div>`;
     return;
@@ -1874,7 +1889,7 @@ function renderHrEmployees(items = state.hrEmployees) {
     <div class="employee-list-summary">
       <span class="employee-live-dot" aria-hidden="true"></span>
       <span class="live-label">Live</span>
-      <span><strong>${visibleItems.length}</strong> of <strong>${matchedItems.length}</strong> ${state.hrShowDuplicates ? "duplicate " : ""}employees shown${query ? ` for <strong>${escapeHtml(query)}</strong>` : ""}</span>
+      <span><strong>${visibleItems.length}</strong> of <strong>${totalMatches}</strong> ${state.hrShowDuplicates ? "duplicate " : ""}employees shown${query ? ` for <strong>${escapeHtml(query)}</strong>` : ""}</span>
     </div>
     ${visibleItems.map((employee, index) => `
       <section class="candidate-result-card employee-result-card">
@@ -1922,16 +1937,16 @@ function renderHrEmployees(items = state.hrEmployees) {
         </aside>
       </section>
     `).join("")}
-    ${visibleItems.length < matchedItems.length ? `
+    ${visibleItems.length < totalMatches ? `
       <div class="employee-list-actions">
         <button class="btn" type="button" data-load-more-employees>Load more</button>
       </div>
     ` : ""}
   `;
   bindEmployeeCardActions();
-  document.querySelector("[data-load-more-employees]")?.addEventListener("click", () => {
+  document.querySelector("[data-load-more-employees]")?.addEventListener("click", async () => {
     state.hrEmployeeVisibleCount += 50;
-    renderHrEmployees();
+    await loadHrEmployees();
   });
 }
 
@@ -2534,8 +2549,9 @@ function bindRoleDashboard(scope) {
   document.querySelector("[data-hr-search]")?.addEventListener("input", event => {
     state.hrEmployeeSearchQuery = event.target.value;
     state.hrEmployeeVisibleCount = 50;
+    clearTimeout(hrEmployeeSearchTimer);
     if (document.querySelector("[data-hr-employees]")) {
-      renderHrEmployees();
+      hrEmployeeSearchTimer = setTimeout(loadHrEmployees, 250);
     } else {
       navigate("/hr/dashboard");
     }

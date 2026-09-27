@@ -2,16 +2,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const rootDir = path.join(__dirname, "..");
-const backendFallbackKeys = new Set([
-  "DATABASE_URL",
-  "JWT_SECRET",
-  "EMPLOYEE_INVITE_CODE",
-  "RESEND_API_KEY",
-  "RESEND_FROM_EMAIL",
-  "EMAIL_FROM",
-  "AUTH_EMAIL_FROM",
-  "APP_URL"
-]);
 let loaded = false;
 
 function parseEnvFile(filePath) {
@@ -42,7 +32,6 @@ function loadLocalEnv() {
   if (loaded) return;
   loaded = true;
   applyEnv(parseEnvFile(path.join(rootDir, ".env")));
-  applyEnv(parseEnvFile(path.join(rootDir, "backend", ".env")), backendFallbackKeys);
 }
 
 module.exports = { loadLocalEnv };

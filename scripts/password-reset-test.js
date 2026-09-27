@@ -5,7 +5,7 @@ const { Pool } = require("pg");
 require("../src/load-env").loadLocalEnv();
 
 if (!process.env.DATABASE_URL) {
-  console.log("Password reset test skipped: DATABASE_URL is required to verify Neon-backed password reset.");
+  console.log("Password reset test skipped: DATABASE_URL is required to verify PostgreSQL-backed password reset.");
   process.exit(0);
 }
 

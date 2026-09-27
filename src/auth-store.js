@@ -11,7 +11,7 @@ const pool = databaseUrl
     })
   : null;
 
-function hasNeonAuth() {
+function hasPostgresAuth() {
   return Boolean(pool);
 }
 
@@ -42,6 +42,19 @@ async function findAuthUserByEmail(email, role = null) {
     [normalizeEmail(email), normalizedRole || null]
   );
   return result.rows[0] || null;
+}
+
+async function findAuthUsersByEmail(email) {
+  await ensureAuthSchema();
+  if (!pool) return [];
+  const result = await pool.query(
+    `SELECT id, full_name, email, phone, password_hash, role, created_at, updated_at, is_active
+     FROM auth_users
+     WHERE LOWER(email) = LOWER($1)
+     ORDER BY id`,
+    [normalizeEmail(email)]
+  );
+  return result.rows;
 }
 
 async function createAuthUser({ fullName, email, phone, password, role }) {
@@ -424,9 +437,10 @@ async function closeAuthStore() {
 }
 
 module.exports = {
-  hasNeonAuth,
+  hasPostgresAuth,
   ensureAuthSchema,
   findAuthUserByEmail,
+  findAuthUsersByEmail,
   createAuthUser,
   verifyAuthPassword,
   updateAuthUserPassword,

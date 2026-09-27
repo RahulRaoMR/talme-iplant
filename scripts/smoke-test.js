@@ -23,7 +23,7 @@ async function waitForServer(proc) {
 
 async function main() {
   if (!process.env.DATABASE_URL) {
-    console.log("Smoke test skipped: DATABASE_URL is required to verify Neon-backed authentication.");
+    console.log("Smoke test skipped: DATABASE_URL is required to verify PostgreSQL-backed authentication.");
     return;
   }
   const email = `smoke-${Date.now()}@talme.test`;

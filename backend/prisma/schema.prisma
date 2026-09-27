@@ -5,6 +5,7 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model AuthUser {
@@ -23,6 +24,25 @@ model AuthUser {
 
   @@index([email, role])
   @@map("auth_users")
+}
+
+model AuthSession {
+  id               BigInt    @id @default(autoincrement())
+  sessionKey       String    @unique @map("session_key")
+  email            String
+  role             String?
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  csrfToken        String    @map("csrf_token")
+  rememberMe       Boolean   @default(false) @map("remember_me")
+  expiresAt        DateTime  @map("expires_at")
+  lastSeenAt       DateTime  @default(now()) @map("last_seen_at")
+  revokedAt        DateTime? @map("revoked_at")
+  ipAddress        String?   @map("ip_address")
+  userAgent        String?   @map("user_agent")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([email])
+  @@map("auth_sessions")
 }
 
 model AuthPasswordOtp {
@@ -132,6 +152,7 @@ model HrEmployeeRecord {
   currentDesignation     String?           @map("current_designation")
   cvFileName             String?           @map("cv_file_name")
   cvStoredName           String?           @map("cv_stored_name")
+  resumeS3Key            String?           @map("resume_s3_key")
   sourceCreatedAt        DateTime?         @map("source_created_at")
   sourceUpdatedAt        DateTime?         @map("source_updated_at")
   sourcePayload          Json?             @map("source_payload")
@@ -139,6 +160,8 @@ model HrEmployeeRecord {
   updatedAt              DateTime          @default(now()) @updatedAt @map("updated_at")
   archivedAt             DateTime?         @map("archived_at")
   import                 HrEmployeeImport? @relation(fields: [importId], references: [id], onDelete: SetNull)
+  resumes                HrEmployeeResume[]
+  employeeSkills         EmployeeSkill[]
 
   @@index([sourceType], map: "hr_employee_records_source_type_idx")
   @@index([sourceId], map: "hr_employee_records_source_id_idx")
@@ -146,5 +169,55 @@ model HrEmployeeRecord {
   @@index([email], map: "hr_employee_records_email_idx")
   @@index([phone], map: "hr_employee_records_phone_idx")
   @@index([name], map: "hr_employee_records_name_idx")
+  @@index([resumeS3Key], map: "hr_employee_records_resume_s3_key_idx")
   @@map("hr_employee_records")
+}
+
+
+model HrEmployeeResume {
+  id                BigInt             @id @default(autoincrement())
+  employeeRecordId  BigInt             @map("employee_record_id")
+  fileName          String?            @map("file_name")
+  filePath          String?            @map("file_path")
+  fileUrl           String?            @map("file_url")
+  storageProvider   String             @default("local") @map("storage_provider")
+  storageKey        String?            @map("storage_key")
+  extractedText     String?            @map("extracted_text")
+  isLatest          Boolean            @default(true) @map("is_latest")
+  uploadedAt        DateTime           @default(now()) @map("uploaded_at")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+  employeeRecord    HrEmployeeRecord   @relation(fields: [employeeRecordId], references: [id], onDelete: Cascade)
+  employeeSkills    EmployeeSkill[]
+
+  @@index([employeeRecordId], map: "hr_employee_resumes_employee_idx")
+  @@index([uploadedAt], map: "hr_employee_resumes_uploaded_idx")
+  @@map("hr_employee_resumes")
+}
+
+model Skill {
+  id              BigInt          @id @default(autoincrement())
+  skillName       String          @map("skill_name")
+  normalizedName  String          @unique @map("normalized_name")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  employeeSkills  EmployeeSkill[]
+
+  @@map("skills")
+}
+
+model EmployeeSkill {
+  id                BigInt            @id @default(autoincrement())
+  employeeRecordId  BigInt            @map("employee_record_id")
+  skillId           BigInt            @map("skill_id")
+  resumeId          BigInt?           @map("resume_id")
+  yearsOfExperience Float?            @map("years_of_experience")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  employeeRecord    HrEmployeeRecord  @relation(fields: [employeeRecordId], references: [id], onDelete: Cascade)
+  skill             Skill             @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  resume            HrEmployeeResume? @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+
+  @@index([employeeRecordId], map: "employee_skills_employee_idx")
+  @@index([skillId], map: "employee_skills_skill_idx")
+  @@index([resumeId], map: "employee_skills_resume_idx")
+  @@map("employee_skills")
 }

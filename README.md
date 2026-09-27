@@ -1,8 +1,8 @@
 # Talme Enterprise Auth
 
-A Node + Neon PostgreSQL authentication system with local RBAC/session mirrors, audit logging, and a responsive login/registration UI.
+A Node + PostgreSQL authentication system with local RBAC/session mirrors, audit logging, and a responsive login/registration UI.
 
-Only users created through the Create Account form can log in. Login checks the Neon `auth_users` table only, with bcrypt password verification and JWT session creation.
+Only users created through the Create Account form can log in. Login checks the PostgreSQL `auth_users` table only, with bcrypt password verification and JWT session creation.
 
 ## Run
 
@@ -44,3 +44,15 @@ Set `EMPLOYEE_INVITE_CODE` only if employee self-registration should be enabled.
 - `GET /api/candidate/applications`
 
 Every protected API verifies JWT authentication and permissions.
+
+## AlloyDB PostgreSQL
+
+This project connects to the existing Google Cloud AlloyDB/PostgreSQL database `iplante` through the backend only. Do not expose database credentials to the browser and do not commit `.env` files.
+
+Set `DATABASE_URL` in `.env` or deployment settings:
+
+```powershell
+DATABASE_URL="postgresql://DATABASE_USER:DATABASE_PASSWORD@DATABASE_HOST:5432/iplante?sslmode=require"
+```
+
+The HR employee search schema is managed by Prisma migrations under `backend/prisma/migrations`. It stores resume metadata, extracted resume text, normalized skills, and indexed search data. Resume PDF/DOCX binaries remain in file/object storage.
