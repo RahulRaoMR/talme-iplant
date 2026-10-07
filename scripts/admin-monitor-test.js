@@ -1,0 +1,45 @@
+const assert = require("node:assert/strict");
+const { DatabaseSync } = require("node:sqlite");
+const { adminActivity, LOGIN_ACTIONS, LOGOUT_ACTIONS } = require("../src/admin-monitor");
+const db = new DatabaseSync(":memory:");
+db.exec(`CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT, email TEXT);
+  CREATE TABLE login_history(id INTEGER PRIMARY KEY, user_id INTEGER, email TEXT, action TEXT,
+    success INTEGER, device TEXT, browser TEXT, ip_address TEXT, timestamp TEXT, location_json TEXT);
+  INSERT INTO users VALUES (1, 'Test Admin', 'admin@example.test');`);
+const insert = db.prepare("INSERT INTO login_history(user_id,email,action,success,device,browser,ip_address,timestamp) VALUES (?,?,?,?,?,?,?,?)");
+function event(action, success, date, email = "admin@example.test") {
+  insert.run(email.startsWith("admin") ? 1 : null, email, action, success, "Windows", "Chrome", "192.0.2.1", date);
+}
+event("Login", 1, "2026-10-05T08:00:00.000Z");
+event("Logout", 1, "2026-10-05T09:00:00.000Z");
+event("Tab Closed Logout", 1, "2026-10-05T10:00:00.000Z");
+event("Failed Login", 0, "2026-10-05T11:00:00.000Z", "unknown@example.test");
+event("Failed Login", 0, "2026-10-04T11:00:00.000Z", "unknown@example.test");
+event("Login", 1, "2026-09-28T18:30:00.000Z");
+event("Login", 1, "2026-09-28T18:29:59.999Z");
+event("Login", 1, "2026-10-05T18:30:00.000Z");
+event("Password Reset", 1, "2026-10-05T12:00:00.000Z");
+const at = new Date("2026-10-05T13:00:00Z");
+const result = adminActivity(db, 7, at);
+assert.equal(result.activity.length, 7);
+assert.deepEqual(result.activity[0], { date: "2026-09-29", logins: 1, logouts: 0 });
+assert.deepEqual(result.activity[6], { date: "2026-10-05", logins: 1, logouts: 2 });
+assert.deepEqual(result.activity[1], { date: "2026-09-30", logins: 0, logouts: 0 });
+assert.equal(result.recentActivity.length, 4);
+assert.equal(result.recentActivity[0].action, "Tab Closed Logout");
+assert.equal(result.recentActivity[0].name, "Test Admin");
+assert.equal(result.failedAttempts.length, 1);
+assert.equal(result.failedAttempts[0].attempts, 2);
+assert.equal(result.failedAttempts[0].timestamp, "2026-10-05T11:00:00.000Z");
+assert.equal(result.locationAvailable, false);
+assert.deepEqual(result.locations, []);
+const today = adminActivity(db, 1, at);
+assert.equal(today.failedAttempts[0].attempts, 1);
+assert.equal(today.recentActivity.length, 3);
+assert.equal(adminActivity(db, 30, at).activity.length, 30);
+assert.equal(adminActivity(db, 90, at).activity.length, 90);
+for (const invalid of [0, 2, -1, 1000, "invalid", "7 OR 1=1"]) assert.throws(() => adminActivity(db, invalid, at), RangeError);
+assert.equal(db.prepare(`SELECT count(*) AS count FROM login_history WHERE success=1 AND action IN ${LOGIN_ACTIONS} AND date(timestamp, '+330 minutes')='2026-10-05'`).get().count, 1);
+assert.equal(db.prepare(`SELECT count(*) AS count FROM login_history WHERE success=1 AND action IN ${LOGOUT_ACTIONS} AND date(timestamp, '+330 minutes')='2026-10-05'`).get().count, 2);
+db.close();
+console.log("Admin monitoring tests passed (ranges, daily aggregation, failures, action classification, and missing geolocation).");

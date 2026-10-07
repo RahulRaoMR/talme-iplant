@@ -55,6 +55,7 @@ async function main() {
     console.log("Auth smoke test skipped: DATABASE_URL is required to verify PostgreSQL-backed authentication.");
     return;
   }
+  const fixture = await require("./auth-test-database").createAuthTestDatabase();
   ({ requestHandler } = require("../src/server"));
   const { deleteAuthUserByEmail, closeAuthStore } = require("../src/auth-store");
   const email = `auth-test-${Date.now()}@talme.test`;
@@ -85,6 +86,9 @@ async function main() {
     });
     assert(adminRegistration.status === 201, `Expected admin registration 201, got ${adminRegistration.status}`);
     assert(adminRegistration.body.success === true, "Expected admin registration success true");
+    const pending = await call("POST", "/api/auth/login", { email, password, role: "hr_manager" });
+    assert(pending.status === 403, "New registrations must be blocked pending admin approval");
+    await fixture.pool.query("UPDATE auth_users SET approval_status = 'APPROVED', is_active = true WHERE email = $1", [email]);
 
     const duplicate = await call("POST", "/api/auth/register", {
       type: "talme_hr",
@@ -141,6 +145,8 @@ async function main() {
   } finally {
     await deleteAuthUserByEmail(email);
     await closeAuthStore();
+    require("../src/db").db.close();
+    await fixture.close();
   }
 }
 

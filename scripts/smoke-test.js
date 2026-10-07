@@ -1,25 +1,4 @@
-const { spawn } = require("node:child_process");
-
 require("../src/load-env").loadLocalEnv();
-
-const baseUrl = `http://localhost:${process.env.PORT || 4000}`;
-
-function wait(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function waitForServer(proc) {
-  for (let index = 0; index < 60; index += 1) {
-    if (proc.exitCode != null) throw new Error("Server exited before becoming ready");
-    try {
-      const response = await fetch(baseUrl);
-      if (response.ok) return;
-    } catch {
-      await wait(250);
-    }
-  }
-  throw new Error("Server did not start in time");
-}
 
 async function main() {
   if (!process.env.DATABASE_URL) {
@@ -28,14 +7,12 @@ async function main() {
   }
   const email = `smoke-${Date.now()}@talme.test`;
   const password = `Smoke-${Date.now()}-Aa1!`;
-  const proc = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "src/server.js"], {
-    stdio: "inherit",
-    env: { ...process.env, PORT: process.env.PORT || "4000" }
-  });
+  const fixture = await require("./auth-test-database").createAuthTestDatabase();
+  const server = require("../src/server");
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
   try {
-    await waitForServer(proc);
-
     const registration = await fetch(`${baseUrl}/api/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -49,6 +26,11 @@ async function main() {
       })
     });
     if (!registration.ok) throw new Error(`Registration failed: ${registration.status} ${await registration.text()}`);
+    const pendingLogin = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password, role: "candidate" })
+    });
+    if (pendingLogin.status !== 403) throw new Error("Pending registration must not be able to log in");
+    await fixture.pool.query("UPDATE auth_users SET approval_status = 'APPROVED', is_active = true WHERE email = $1 AND role = 'candidate'", [email]);
 
     const login = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",
@@ -85,10 +67,12 @@ async function main() {
 
     console.log("Smoke test passed: login, allowed dashboard, forbidden dashboard, and permission middleware.");
   } finally {
-    proc.kill();
+    await new Promise(resolve => server.close(resolve));
     const { deleteAuthUserByEmail, closeAuthStore } = require("../src/auth-store");
     await deleteAuthUserByEmail(email);
     await closeAuthStore();
+    require("../src/db").db.close();
+    await fixture.close();
   }
 }
 

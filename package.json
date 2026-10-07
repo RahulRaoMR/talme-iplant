@@ -7,12 +7,20 @@
     "node": "24.x"
   },
   "scripts": {
-    "build": "node --check src/load-env.js && node --check src/config.js && node --check src/email.js && node --check src/server.js && node --check src/security.js && node --check src/auth-store.js && node --check src/employee-store.js && node --check src/s3-storage.js && node --check api/index.js && node --check public/app.js && node --check scripts/smoke-test.js && node --check scripts/auth-smoke-test.js && node --check scripts/password-reset-test.js && node --check scripts/employee-audit-test.js && node --check scripts/import-local-employees.js && node --check scripts/import-hr-employees-to-postgres.js && node --check scripts/verify-hr-employee-migration.js && node --check scripts/export-production-db.js && node --check scripts/import-production-db-to-aws.js && node --check scripts/verify-aws-migration.js",
+    "build": "node --check src/load-env.js && node --check src/config.js && node --check src/email.js && node --check src/server.js && node --check src/security.js && node --check src/auth-store.js && node --check src/employee-store.js && node --check src/employee-search.js && node --check src/advanced-candidate-search.js && node --check src/admin-monitor.js && node --check src/s3-storage.js && node --check api/index.js && node --check public/app.js && node --check public/candidate-search.js && node --check public/admin-control.js && node --check public/employee-profile.js && node --check scripts/employee-profile-api-test.js && node --check scripts/admin-monitor-test.js && node --check scripts/admin-monitor-api-test.js && node --check scripts/smoke-test.js && node --check scripts/auth-smoke-test.js && node --check scripts/password-reset-test.js && node --check scripts/employee-audit-test.js && node --check scripts/import-local-employees.js && node --check scripts/import-hr-employees-to-postgres.js && node --check scripts/verify-hr-employee-migration.js && node --check scripts/export-production-db.js && node --check scripts/import-production-db-to-aws.js && node --check scripts/verify-aws-migration.js",
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
     "auth:smoke": "node --disable-warning=ExperimentalWarning scripts/auth-smoke-test.js",
     "password-reset:smoke": "node --disable-warning=ExperimentalWarning scripts/password-reset-test.js",
     "employee-audit:smoke": "node --disable-warning=ExperimentalWarning scripts/employee-audit-test.js",
+    "employee-search:test": "node scripts/employee-search-test.js",
+    "employee-profile:test": "node --disable-warning=ExperimentalWarning scripts/employee-profile-api-test.js",
+    "candidate-search:test": "node scripts/advanced-candidate-search-test.js",
+    "admin-monitor:test": "node --disable-warning=ExperimentalWarning scripts/admin-monitor-test.js && node --disable-warning=ExperimentalWarning scripts/admin-monitor-api-test.js && node scripts/registered-users-test.js",
+    "admin-counters:test": "node --disable-warning=ExperimentalWarning scripts/admin-counter-test.js && node --disable-warning=ExperimentalWarning scripts/admin-counter-auth-test.js",
+    "registration-approval:test": "node --disable-warning=ExperimentalWarning scripts/registration-approval-test.js",
+    "auth-protection:test": "node --disable-warning=ExperimentalWarning scripts/auth-protection-test.js",
+    "ip-location:test": "node --disable-warning=ExperimentalWarning scripts/ip-location-test.js && node --disable-warning=ExperimentalWarning scripts/ip-location-api-test.js",
     "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke-test.js",
     "hr:import:dry-run": "node --disable-warning=ExperimentalWarning scripts/import-hr-employees-to-postgres.js --dry-run",
     "hr:import": "node --disable-warning=ExperimentalWarning scripts/import-hr-employees-to-postgres.js --apply",
@@ -34,6 +42,10 @@
     "@aws-sdk/client-s3": "^3.1113.0",
     "@aws-sdk/s3-request-presigner": "^3.1113.0",
     "bcrypt": "^6.0.0",
+    "d3-geo": "^3.1.1",
+    "geoip-lite": "^2.0.3",
+    "ipaddr.js": "^2.5.0",
+    "lucene": "^2.1.1",
     "pg": "^8.22.0",
     "xlsx": "^0.18.5"
   }

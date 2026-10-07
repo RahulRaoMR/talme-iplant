@@ -12,6 +12,15 @@ const state = {
   hrEmployeeSearchQuery: "",
   hrEmployeePagination: { page: 1, limit: 50, total: 0, totalPages: 0 },
   hrShowDuplicates: false,
+  hrTalentPage: 1,
+  hrTalentSection: "new",
+  hrTalentStage: "all",
+  hrTalentView: "list",
+  hrTalentFilters: { locations: [], skills: [], experiences: [], company: "", designation: "", cv: "", sort: "relevance" },
+  hrTalentSelected: new Set(),
+  hrAdvancedSearch: null,
+  hrCandidateSearchDraft: null,
+  hrAdvancedApplied: false,
   expandedEmployeeSkills: new Set(),
   hrImportConfirmation: "",
   profileCount: Number(localStorage.getItem("talme_profile_count")) || 1501,
@@ -34,17 +43,6 @@ const registerTypes = [
   ["recruiter", "Recruiter Registration"],
   ["employee", "Employee Registration (Invite Only)"],
   ["company", "Company Registration"]
-];
-
-const roleCards = [
-  ["Candidate", ["Search Jobs", "Apply Jobs", "Upload Resume", "Track Applications", "AI Resume Builder"]],
-  ["Employer", ["Post Jobs", "Search Candidates", "Resume Database", "ATS", "Company Dashboard", "Reports"]],
-  ["Recruiter", ["Candidate Pipeline", "Interview Management", "Schedule Interviews", "Candidate Notes", "Email Candidates"]],
-  ["HR Manager", ["Employees", "Attendance", "Payroll", "Leaves", "Performance", "Documents", "Shifts"]],
-  ["Employee", ["Dashboard", "Punch In", "Punch Out", "Attendance", "Salary Slips", "Leave Requests", "Profile", "Documents"]],
-  ["Company Admin", ["Employees", "Recruiters", "Jobs", "Payroll", "Attendance", "Leaves", "Reports", "Billing"]],
-  ["Platform Admin", ["Companies", "Subscriptions", "Approvals", "Analytics", "Support Tickets"]],
-  ["Super Admin", ["Complete access to everything"]]
 ];
 
 const dashboardTitles = {
@@ -70,6 +68,7 @@ let importCommitProgressTimer = null;
 let hrEmployeesLiveTimer = null;
 let hrEmployeesLiveLoading = false;
 let hrEmployeeSearchTimer = null;
+let hrEmployeeRequestId = 0;
 
 document.body.classList.toggle("dark", state.theme === "dark");
 
@@ -207,7 +206,7 @@ async function api(path, options = {}) {
     });
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw Object.assign(new Error(payload.message || payload.error || "Request failed"), { status: response.status, payload });
+  if (!response.ok) throw Object.assign(new Error(payload.message || payload.error || "Request failed"), { status: response.status, payload, retryAfter: Number(payload.retryAfter || response.headers.get("Retry-After") || 0) });
   return payload;
 }
 
@@ -319,8 +318,15 @@ async function hydrate() {
 }
 
 function render() {
+  releaseEmployeeProfileResources();
+  destroyAdminCharts();
+  if (!window.location.pathname.startsWith("/admin/") && !window.location.pathname.startsWith("/platform/")) {
+    if (securityMonitorTimer) clearInterval(securityMonitorTimer);
+    securityMonitorTimer = null;
+  }
   document.body.classList.toggle("dark", state.theme === "dark");
   const pathname = window.location.pathname;
+  if (pathname === "/hr/search") return renderAdvancedCandidateSearch(document.querySelector("#app"));
   if (!pathname.startsWith("/hr")) stopHrEmployeesLive();
   if (pathname.startsWith("/hr/employees/")) return renderHrEmployeeRoute(pathname);
   if (pathname.includes("/dashboard")) return renderDashboard(pathname);
@@ -388,20 +394,6 @@ function landing() {
           </div>
         </div>
       </section>
-      <section class="section" id="products">
-        <div class="section-head">
-          <span class="eyebrow">${icon("key")} Role based access control</span>
-          <h2>Every workspace opens only what the role is allowed to use.</h2>
-        </div>
-        <div class="role-matrix">
-          ${roleCards.map(([title, modules], index) => `
-            <article class="role-card">
-              <div class="role-top"><span>${String(index + 1).padStart(2, "0")}</span><h3>${title}</h3></div>
-              <ul>${modules.map(module => `<li>${icon("shield")}${module}</li>`).join("")}</ul>
-            </article>
-          `).join("")}
-        </div>
-      </section>
     </main>
   `;
 }
@@ -458,6 +450,10 @@ async function loadPublicProfileCount() {
     state.profileCount = totalEmployees;
     localStorage.setItem("talme_profile_count", String(state.profileCount));
     target.innerHTML = `${icon("users")} ${profileCountLabel()} employees`;
+    document.querySelectorAll("[data-hr-total-employees]").forEach(element => {
+      element.textContent = `${profileCountLabel()} employees`;
+    });
+    updateTalentSummary();
   } catch {
   }
 }
@@ -699,6 +695,10 @@ function setNotice(text, ok = false) {
 
 function authNoticeMessage(error, fallback) {
   const message = String(error?.message || error || "");
+  if (error?.status === 429 && error.retryAfter > 0) {
+    const minutes = Math.ceil(error.retryAfter / 60);
+    return `${message} Retry in ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`;
+  }
   if (/already registered/i.test(message)) return "This email is already registered. Please login.";
   if (/email address is not registered|account not found/i.test(message)) return "Email address is not registered.";
   if (/invalid password|incorrect password/i.test(message)) return "Invalid password.";
@@ -760,8 +760,8 @@ async function submitRegister(event) {
   }
   setSubmitLoading(form, true, "Creating account...");
   try {
-    await api("/api/auth/register", { method: "POST", body });
-    openAuth("login", state.selectedRole, "Registration successful. Please login.");
+    const result = await api("/api/auth/register", { method: "POST", body });
+    openAuth("login", state.selectedRole, result.message);
   } catch (error) {
     setNotice(authNoticeMessage(error, "Something went wrong. Please try again later."));
   } finally {
@@ -956,101 +956,95 @@ function saveRoleWorkspace(key, data) {
 }
 
 function renderAdminDashboard(root, title = "Admin Control Center", role = "Super Admin") {
-  const workspace = loadRoleWorkspace("talme_admin_workspace", {
-    announcement: "Review company approvals and platform audit activity.",
-    priority: "Security review",
-    ticketStatus: "12 open"
-  });
-  root.innerHTML = h`
-    <main class="site role-app admin-app">
-      ${roleTopbar(title, role, state.user?.redirectTo || "/admin/dashboard")}
-      <section class="role-workspace">
-        <div class="role-hero">
-          <div>
-            <span class="eyebrow">${icon("shield")} Admin only</span>
-            <h1>Live device and login monitoring</h1>
-            <p>Monitor registered users, active sessions, logged-in users, device types, logout events, and failed login attempts across the platform.</p>
-          </div>
-          <button class="btn" data-activity>Login Activity</button>
-        </div>
-        <div class="security-status">
-          <span class="live-dot"></span>
-          <strong>Real-time security dashboard</strong>
-          <small data-security-refresh>Loading live data...</small>
-        </div>
-        <div class="role-grid security-grid">
-          ${securityMetric("Total Registered Users", "totalRegisteredUsers", "registeredDevices")}
-          ${securityMetric("Total Active Users", "totalActiveUsers")}
-          ${securityMetric("Live Online Users", "liveOnlineUsers")}
-          ${securityMetric("Total Logged In Today", "totalLoggedInToday")}
-          ${securityMetric("Total Logged Out Today", "totalLoggedOutToday")}
-          ${securityMetric("Active Devices", "activeDevices")}
-          ${securityMetric("Mobile Devices", "mobileDevices")}
-          ${securityMetric("Desktop Devices", "desktopDevices")}
-          ${securityMetric("Tablet Devices", "tabletDevices")}
-          ${securityMetric("Failed Login Attempts", "failedLoginAttempts")}
-        </div>
-        <section class="workspace-panel security-table-panel" data-registered-devices-panel hidden>
-          <div class="panel-title">
-            <h2>Registered Devices</h2>
-            <p>All backend-stored devices registered by users.</p>
-          </div>
-          <div class="security-table" data-registered-devices>
-            <div class="security-empty">Click Total Registered Users to load registered devices.</div>
-          </div>
-        </section>
-        <section class="workspace-panel security-table-panel">
-          <div class="panel-title">
-            <h2>Live Online Users</h2>
-            <p>Users with activity in the last 5 minutes.</p>
-          </div>
-          <div class="security-table" data-live-online-users>
-            <div class="security-empty">Loading live online users...</div>
-          </div>
-        </section>
-        <section class="workspace-panel security-table-panel">
-          <div class="panel-title">
-            <h2>User Login Details</h2>
-            <p>Stored backend session details visible only to Super Admin and Platform Admin.</p>
-          </div>
-          <div class="security-table" data-online-users>
-            <div class="security-empty">Loading online users...</div>
-          </div>
-        </section>
-      </section>
-    </main>
-  `;
-  bindRoleDashboard("admin");
-  startSecurityMonitor();
+  renderAdminControlCenter(root, title, role);
 }
 
-function renderHrDashboard(root) {
+function talentWorkspaceHeader(section = state.hrTalentSection) {
+  const userName = state.user?.name || "HR Admin";
+  return `<header class="talent-topbar">
+    <a class="talent-brand" href="/hr/dashboard"><img src="/talme-logo.png" alt="Talme Technologies"><div><strong>Talme Hiring Portal</strong><span>Talent search and HR workspace</span></div></a>
+    <nav class="talent-topnav" aria-label="Main navigation">
+      ${[["dashboard", "House", "Home"], ["new", "UsersRound", "New Talent"], ["experienced", "BriefcaseBusiness", "Experienced Talent"], ["employees", "ContactRound", "Employees"], ["reports", "ChartNoAxesCombined", "Reports"]].map(([key, symbol, label]) => `<button type="button" class="${section === key ? "active" : ""}" data-talent-section="${key}">${icon(symbol)}${label}</button>`).join("")}
+    </nav>
+    <button class="talent-global-search" type="button" data-open-candidate-search title="Advanced candidate search">${icon("search")}<span>${escapeHtml(state.hrEmployeeSearchQuery || "Search candidates, skills, location...")}</span></button>
+    <div class="talent-top-actions">
+      <button class="talent-button primary" type="button" data-open-add-employee title="Add candidate" aria-label="Add candidate">${icon("plus")}<span>Add Candidate</span></button>
+      <button class="talent-button" type="button" data-open-import title="Import Excel" aria-label="Import Excel">${icon("Upload")}<span>Import Excel</span></button>
+      <details class="talent-user-menu">
+        <summary><span class="talent-user-avatar">${escapeHtml(profileInitials(userName))}</span><span class="talent-user-name">${escapeHtml(userName)}<small>HR Admin</small></span>${icon("ChevronDown")}</summary>
+        <div class="talent-menu-content"><button type="button" data-theme>${icon(state.theme === "dark" ? "sun" : "moon")}Toggle theme</button><button type="button" data-logout>${icon("logout")}Logout</button></div>
+      </details>
+    </div>
+  </header>`;
+}
+
+function renderHrDashboard(root, options = {}) {
+  state.hrEmployeeVisibleCount = 20;
+  const section = state.hrTalentSection;
+  const title = { new: "New Talent", experienced: "Experienced Talent", employees: "Employees", dashboard: "Dashboard", shortlist: "Shortlist", interviews: "Interviews", offers: "Offers", reports: "Reports", settings: "Settings" }[section] || "New Talent";
+  const navigation = [["dashboard", "House", "Dashboard"], ["new", "UsersRound", "New Talent"], ["experienced", "BriefcaseBusiness", "Experienced Talent"], ["shortlist", "Star", "Shortlist"], ["interviews", "MessagesSquare", "Interviews"], ["offers", "ClipboardCheck", "Offers"], ["employees", "ContactRound", "Employees"], ["reports", "ChartNoAxesCombined", "Reports"], ["settings", "Settings", "Settings"]];
+  const filters = state.hrTalentFilters;
+  const filterOptions = (key, options) => options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${filters[key] === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+  const filterGroup = (title, key, options, searchable = false) => `
+    <details class="talent-filter-group" open>
+      <summary>${title}${icon("ChevronDown")}</summary>
+      ${searchable ? `<label class="talent-filter-search">${icon("search")}<input type="search" placeholder="Search ${title.toLowerCase()}..." aria-label="Search ${title.toLowerCase()} filters" data-filter-options="${key}"></label>` : ""}
+      <div class="talent-filter-options" data-filter-option-list="${key}">
+        ${options.map(([value, label]) => `<label><input type="checkbox" data-talent-checkbox="${key}" value="${escapeHtml(value)}" ${filters[key].includes(value) ? "checked" : ""}><span>${escapeHtml(label)}</span></label>`).join("")}
+      </div>
+    </details>`;
+  const saved = loadRoleWorkspace(talentStorageKey("searches"), []);
   root.innerHTML = h`
-    <main class="site role-app hr-app">
-      ${roleTopbar("Talme HR Workspace", "HR Manager", "/hr/dashboard")}
-      <section class="role-workspace">
-        <section class="employee-panel">
-          <div class="employee-panel-head">
-            <div>
-              <h2>Employees</h2>
-              <p>Employee records appear one by one below.</p>
+    <main class="site hr-app talent-app">
+      ${talentWorkspaceHeader(section)}
+      <div class="talent-layout">
+        <aside class="talent-navigation"><nav aria-label="Hiring workspace">${navigation.map(([key, symbol, label]) => `<button type="button" class="${section === key ? "active" : ""}" data-talent-section="${key}">${icon(symbol)}<span>${label}</span></button>`).join("")}</nav>
+          <div class="talent-total"><span class="employee-live-dot"></span><div><strong data-hr-total-employees>${profileCountLabel()} employees</strong><small>Total employees</small></div></div>
+          <span data-profile-count hidden></span>
+        </aside>
+        <aside class="talent-filters" aria-label="Candidate filters">
+          <div class="talent-filters-head"><strong>${icon("SlidersHorizontal")}Filters</strong><button type="button" data-clear-talent-filters>Clear All</button></div>
+          ${filterGroup("Work Experience", "experiences", [["0-0", "Fresher"], ["0-2", "0 - 2 years"], ["2-5", "2 - 5 years"], ["5-10", "5 - 10 years"], ["10-*", "10+ years"]])}
+          ${filterGroup("Location", "locations", [["Bangalore", "Bangalore"], ["Hyderabad", "Hyderabad"], ["Pune", "Pune"], ["Chennai", "Chennai"], ["Mumbai", "Mumbai"], ["Delhi", "Delhi"], ["Noida", "Noida"]], true)}
+          ${filterGroup("Skills", "skills", [["Java", "Java"], ["Python", "Python"], ["React", "React"], ["Node.js", "Node.js"], ["SQL", "SQL"], ["Spring", "Spring Boot"], ["JavaScript", "JavaScript"]], true)}
+          <details class="talent-filter-group" open><summary>Current Company${icon("ChevronDown")}</summary><label class="talent-filter-search">${icon("search")}<input type="search" data-talent-filter="company" placeholder="Search company..." aria-label="Filter by company" value="${escapeHtml(filters.company)}"></label></details>
+        </aside>
+        <section class="talent-content">
+          <div class="talent-page-heading"><div><h1>${title}</h1><p>Search and manage candidates. Find the right talent for your team.</p></div>
+            <div class="talent-heading-actions"><details class="talent-saved-searches"><summary class="talent-button">Saved Searches${icon("ChevronDown")}</summary><div class="talent-menu-content"><button type="button" data-save-talent-search>${icon("BookmarkPlus")}Save current search</button>${saved.map((search, index) => `<button type="button" data-saved-talent-search="${index}">${icon("search")}${escapeHtml(search.name)}</button>`).join("")}</div></details><button class="talent-button talent-mobile-filters" type="button" data-toggle-talent-filters>${icon("SlidersHorizontal")}Filters</button></div>
+          </div>
+          ${section === "settings" ? `<section class="talent-settings"><h2>Workspace preferences</h2><label>Appearance<select data-talent-theme><option value="light" ${state.theme === "light" ? "selected" : ""}>Light</option><option value="dark" ${state.theme === "dark" ? "selected" : ""}>Dark</option></select></label><button class="talent-button" type="button" data-logout>${icon("logout")}Logout</button></section>` : `
+          ${["dashboard", "reports"].includes(section) ? `<div class="talent-report" data-talent-report></div>` : ""}
+          <nav class="talent-tabs" aria-label="Candidate status">${[["all", "All Candidates"], ["active", "Active"], ["shortlisted", "Shortlisted"], ["process", "In Process"], ["interview", "Interview"], ["hired", "Hired"]].map(([key, label]) => `<button type="button" data-talent-stage="${key}" class="${state.hrTalentStage === key ? "active" : ""}">${label} <span data-talent-stage-count="${key}"></span></button>`).join("")}</nav>
+          <form class="talent-search-form"><label>${icon("search")}<input type="search" data-hr-search readonly placeholder="Search by name, skills, designation, company, location, email, phone..." aria-label="Open advanced candidate search" value="${escapeHtml(state.hrEmployeeSearchQuery)}"></label><button class="talent-button primary" type="submit">${icon("search")}Search</button></form>
+          ${state.hrAdvancedApplied ? `<div class="talent-applied-search"><span>${icon("SlidersHorizontal")}Advanced search applied</span><button type="button" data-open-candidate-search>Edit search</button><button type="button" data-clear-talent-filters>Clear</button></div>` : ""}
+          <div class="talent-quick-filters">
+            <label>Skills<select data-talent-quick-filter="skills"><option value="">All skills</option>${["Java", "Python", "React", "SQL", "Spring", "JavaScript"].map(value => `<option ${filters.skills.includes(value) ? "selected" : ""}>${value}</option>`).join("")}</select></label>
+            <label>Location<select data-talent-quick-filter="locations"><option value="">All locations</option>${["Bangalore", "Hyderabad", "Pune", "Chennai", "Mumbai", "Delhi"].map(value => `<option ${filters.locations.includes(value) ? "selected" : ""}>${value}</option>`).join("")}</select></label>
+            <label>Experience<select data-talent-quick-filter="experiences"><option value="">Any experience</option>${[["0-0", "Fresher"], ["0-2", "0 - 2 years"], ["2-5", "2 - 5 years"], ["5-10", "5 - 10 years"], ["10-*", "10+ years"]].map(([value, label]) => `<option value="${value}" ${filters.experiences.includes(value) ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+            <label>Designation<input type="search" data-talent-filter="designation" placeholder="Any designation" value="${escapeHtml(filters.designation)}"></label>
+            <label>Resume<select data-talent-filter="cv">${filterOptions("cv", [["", "Any resume"], ["attached", "With resume"], ["missing", "Without resume"]])}</select></label>
+            <button class="talent-button" type="button" data-more-talent-filters>${icon("ListFilter")}More Filters</button>
+          </div>
+          <div class="talent-more-filters" hidden><label><input type="checkbox" data-show-duplicates ${state.hrShowDuplicates ? "checked" : ""}>Duplicate records on this page</label><button class="talent-button" type="button" data-clear-talent-filters>Clear filters</button></div>
+          <div class="talent-results-toolbar">
+            <strong data-talent-found aria-live="polite">Loading candidates...</strong>
+            <div class="talent-results-controls"><label>Sort by:<select data-talent-filter="sort">${filterOptions("sort", [["relevance", "Relevance"], ["name", "Name"], ["experience", "Experience"], ["recent", "Recently updated"]])}</select></label>
+              <div class="talent-view-toggle" aria-label="Results view"><button type="button" title="List view" aria-label="List view" data-talent-view="list" class="${state.hrTalentView === "list" ? "active" : ""}">${icon("List")}</button><button type="button" title="Grid view" aria-label="Grid view" data-talent-view="grid" class="${state.hrTalentView === "grid" ? "active" : ""}">${icon("LayoutGrid")}</button></div>
+              <span data-talent-range></span><button type="button" class="talent-icon-button" title="Previous page" aria-label="Previous page" data-talent-page="-1" disabled>${icon("ChevronLeft")}</button><button type="button" class="talent-icon-button" title="Next page" aria-label="Next page" data-talent-page="1" disabled>${icon("ChevronRight")}</button>
             </div>
-            <div class="employee-panel-actions">
-              <button class="btn ${state.hrShowDuplicates ? "active" : ""}" type="button" data-show-duplicates>${icon("users")}Duplicate</button>
-              <button class="btn" type="button" data-open-add-employee>${icon("plus")}Add employee</button>
-            </div>
           </div>
-          <div data-hr-import-confirmation>
-            ${state.hrImportConfirmation ? renderHrImportConfirmation(state.hrImportConfirmation) : ""}
-          </div>
-          <div class="employee-card-list" data-hr-employees>
-            <div class="security-empty">Loading employees...</div>
-          </div>
+          <div class="talent-selection-bar" data-talent-selection hidden><span></span><button class="talent-button" type="button" data-export-talent>${icon("Download")}Export selected</button><button class="talent-button" type="button" data-bulk-shortlist>${icon("Star")}Shortlist</button><button class="talent-icon-button" type="button" title="Clear selection" aria-label="Clear selection" data-clear-talent-selection>${icon("x")}</button></div>
+          <div data-hr-import-confirmation>${state.hrImportConfirmation ? renderHrImportConfirmation(state.hrImportConfirmation) : ""}</div>
+          <div class="talent-record-list ${state.hrTalentView === "grid" ? "grid-view" : ""}" data-hr-employees aria-live="polite"><div class="security-empty">Loading candidates...</div></div>
+          `}
         </section>
-      </section>
+      </div>
     </main>
   `;
-  bindRoleDashboard("hr");
+  bindRoleDashboard("hr", { skipEmployeeLoad: options.preloaded });
+  bindTalentWorkspace();
+  if (options.preloaded) renderHrEmployees();
 }
 
 function renderHrCandidateProfile(root) {
@@ -1262,7 +1256,8 @@ function renderHrCandidateProfile(root) {
 }
 
 function roleTopbar(title, role, dashboardPath) {
-  const addEmployeeAction = role === "HR Manager"
+  const isHrWorkspace = dashboardPath === "/hr/dashboard";
+  const addEmployeeAction = isHrWorkspace
     ? `<button class="btn employee-add-trigger" type="button" data-open-add-employee>${icon("plus")}Add employee</button>`
     : "";
   return `
@@ -1277,7 +1272,7 @@ function roleTopbar(title, role, dashboardPath) {
         <a href="#experienced-talent">Experienced Talent</a>
         <label class="nav-search" aria-label="Search">
           ${icon("search")}
-          <input type="search" placeholder="Search jobs, talent, companies" ${role === "HR Manager" ? `data-hr-search value="${escapeHtml(state.hrEmployeeSearchQuery)}"` : ""}>
+          <input type="search" placeholder="Search jobs, talent, companies" ${isHrWorkspace ? `data-hr-search value="${escapeHtml(state.hrEmployeeSearchQuery)}"` : ""}>
         </label>
       </nav>
       <div class="candidate-actions">
@@ -1769,6 +1764,7 @@ function bindEmployeeAdd() {
         renderHrDashboard(document.querySelector("#app"));
       }
       await loadHrEmployees();
+      loadPublicProfileCount();
       document.querySelector(".employee-add-backdrop")?.remove();
     } catch (error) {
       status.textContent = error.message;
@@ -1789,8 +1785,9 @@ async function loadHrEmployees() {
   const target = document.querySelector("[data-hr-employees]");
   if (!target) return;
   try {
-    await fetchHrEmployees();
-    state.hrEmployeeVisibleCount = 50;
+    const items = await fetchHrEmployees();
+    if (items === null) return;
+    if (!document.querySelector(".talent-app")) state.hrEmployeeVisibleCount = 50;
     renderHrEmployees();
   } catch (error) {
     target.innerHTML = `<div class="security-empty">${escapeHtml(error.message)}</div>`;
@@ -1817,8 +1814,10 @@ async function refreshHrEmployeesLive() {
   const before = employeeListSignature();
   try {
     const previousVisibleCount = state.hrEmployeeVisibleCount;
-    await fetchHrEmployees();
-    state.hrEmployeeVisibleCount = Math.max(previousVisibleCount, Math.min(50, state.hrEmployees.length || previousVisibleCount));
+    const items = await fetchHrEmployees();
+    if (items === null) return;
+    if (!document.querySelector(".talent-app")) state.hrEmployeeVisibleCount = Math.max(previousVisibleCount, Math.min(50, state.hrEmployees.length || previousVisibleCount));
+    updateTalentSummary();
     if (employeeListSignature() !== before) renderHrEmployees();
   } catch {
   } finally {
@@ -1839,13 +1838,25 @@ function stopHrEmployeesLive() {
 }
 
 async function fetchHrEmployees() {
+  const requestId = ++hrEmployeeRequestId;
+  const isTalentWorkspace = Boolean(document.querySelector(".talent-app"));
   const params = new URLSearchParams({
-    page: "1",
+    page: String(isTalentWorkspace ? state.hrTalentPage : 1),
     limit: String(state.hrEmployeeVisibleCount || 50)
   });
+  if (isTalentWorkspace) {
+    if (state.hrAdvancedApplied) params.set("advanced", JSON.stringify(state.hrAdvancedSearch));
+    for (const [key, value] of Object.entries(state.hrTalentFilters)) {
+      if (Array.isArray(value) ? value.length : Boolean(value)) params.set(key, Array.isArray(value) ? value.join(",") : value);
+    }
+    const pipeline = loadRoleWorkspace(talentStorageKey("pipeline"), {});
+    if (state.hrTalentStage === "active") params.set("excludeIds", JSON.stringify(Object.keys(pipeline)));
+    else if (state.hrTalentStage !== "all") params.set("ids", JSON.stringify(Object.keys(pipeline).filter(id => pipeline[id].stage === state.hrTalentStage)));
+  }
   const query = state.hrEmployeeSearchQuery.trim();
-  if (query) params.set("q", query);
+  if (query && !state.hrAdvancedApplied) params.set("q", query);
   const payload = await api(`/api/hr/employees/search?${params.toString()}`);
+  if (requestId !== hrEmployeeRequestId) return null;
   state.hrEmployees = payload.items || [];
   state.hrEmployeePagination = payload.pagination || {
     page: 1,
@@ -1853,8 +1864,16 @@ async function fetchHrEmployees() {
     total: state.hrEmployees.length,
     totalPages: 1
   };
-  state.profileCount = state.hrEmployeePagination.total || state.hrEmployees.length;
-  localStorage.setItem("talme_profile_count", String(state.profileCount));
+  const hasFilters = isTalentWorkspace && (state.hrAdvancedApplied || state.hrTalentStage !== "all" || Object.entries(state.hrTalentFilters).some(([key, value]) => key !== "sort" && (Array.isArray(value) ? value.length : Boolean(value))));
+  if (!query && !hasFilters) {
+    state.profileCount = state.hrEmployeePagination.total;
+    localStorage.setItem("talme_profile_count", String(state.profileCount));
+    document.querySelectorAll("[data-hr-total-employees]").forEach(element => {
+      element.textContent = `${profileCountLabel()} employees`;
+    });
+    const countStatus = document.querySelector(".hr-portal-shell [data-profile-count]");
+    if (countStatus) countStatus.innerHTML = `${icon("users")} ${profileCountLabel()} employees`;
+  }
   return state.hrEmployees;
 }
 
@@ -1872,6 +1891,7 @@ function mergeHrEmployeeLists(importedItems, dbItems) {
 }
 
 function renderHrEmployees(items = state.hrEmployees) {
+  if (document.querySelector(".talent-app")) return renderTalentRecords(items);
   const target = document.querySelector("[data-hr-employees]");
   if (!target) return;
   if (!items.length) {
@@ -1954,6 +1974,272 @@ function renderHrEmployees(items = state.hrEmployees) {
     state.hrEmployeeVisibleCount += 50;
     await loadHrEmployees();
   });
+}
+
+function talentStorageKey(name) {
+  return `talme_hr_${name}_${state.user?.id || state.user?.email || "workspace"}`;
+}
+
+function updateTalentSummary() {
+  if (!document.querySelector(".talent-app")) return;
+  const pipeline = loadRoleWorkspace(talentStorageKey("pipeline"), {});
+  const stages = Object.values(pipeline);
+  const counts = { all: state.profileCount, active: Math.max(0, state.profileCount - stages.length) };
+  for (const stage of ["shortlisted", "process", "interview", "hired"]) counts[stage] = stages.filter(item => item.stage === stage).length;
+  document.querySelectorAll("[data-talent-stage-count]").forEach(element => {
+    element.textContent = `(${formatNumber(counts[element.dataset.talentStageCount] || 0)})`;
+  });
+  const found = document.querySelector("[data-talent-found]");
+  const total = state.hrEmployeePagination.total;
+  if (found) found.innerHTML = `<b>${formatNumber(total)}</b> candidates found`;
+  const first = total ? (state.hrTalentPage - 1) * 20 + 1 : 0;
+  const range = document.querySelector("[data-talent-range]");
+  if (range) range.textContent = `${first} - ${Math.min(state.hrTalentPage * 20, total)} of ${formatNumber(total)}`;
+  document.querySelectorAll("[data-talent-page]").forEach(button => {
+    button.disabled = Number(button.dataset.talentPage) < 0 ? state.hrTalentPage <= 1 : state.hrTalentPage >= state.hrEmployeePagination.totalPages;
+  });
+  const report = document.querySelector("[data-talent-report]");
+  if (report) report.innerHTML = [["Total employees", counts.all], ["Shortlisted", counts.shortlisted], ["Interviews", counts.interview], ["Hired", counts.hired]].map(([label, count]) => `<div><span>${label}</span><strong>${formatNumber(count)}</strong></div>`).join("");
+}
+
+function renderTalentRecords(items) {
+  const target = document.querySelector("[data-hr-employees]");
+  if (!target) return;
+  updateTalentSummary();
+  const pipeline = loadRoleWorkspace(talentStorageKey("pipeline"), {});
+  const query = state.hrEmployeeSearchQuery.trim();
+  const stages = { active: "Active", shortlisted: "Shortlisted", process: "In Process", interview: "Interview", hired: "Hired" };
+  const actions = { active: ["shortlisted", "Shortlist"], shortlisted: ["process", "Move to Interview"], process: ["interview", "Schedule Interview"], interview: ["hired", "Mark Hired"], hired: ["active", "Reopen"] };
+  const records = state.hrShowDuplicates ? duplicateHrEmployees(items) : items;
+  target.classList.toggle("grid-view", state.hrTalentView === "grid");
+  if (!records.length) {
+    target.innerHTML = `<div class="talent-empty">${icon("SearchX")}<h2>No candidates found</h2><p>${state.hrShowDuplicates ? "No duplicate records on this page." : "No records match the current search and filters."}</p><button class="talent-button" type="button" data-empty-clear-filters>Clear filters</button></div>`;
+    target.querySelector("[data-empty-clear-filters]")?.addEventListener("click", clearTalentFilters);
+    updateTalentSelection();
+    return;
+  }
+  target.innerHTML = records.map((employee, index) => {
+    const id = employeeRecordId(employee, index);
+    const workflow = pipeline[id] || {};
+    const stage = workflow.stage || "active";
+    const [nextStage, action] = actions[stage] || actions.active;
+    const skills = Array.isArray(employee.skills) && employee.skills.length ? employee.skills : employeeSkills(employee.keywords);
+    const expanded = state.expandedEmployeeSkills.has(id);
+    const shownSkills = expanded ? skills : skills.slice(0, 4);
+    const updated = employee.updatedAt || employee.updated_at || employee.last_edited_at;
+    const date = updated && !Number.isNaN(new Date(updated).getTime()) ? new Date(updated).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "";
+    return `<article class="talent-record">
+      <label class="talent-record-check"><input type="checkbox" aria-label="Select ${escapeHtml(employee.name || "candidate")}" data-talent-select="${escapeHtml(id)}" ${state.hrTalentSelected.has(id) ? "checked" : ""}></label>
+      <div class="talent-record-avatar">${escapeHtml(profileInitials(employee.name || "Employee"))}</div>
+      <div class="talent-record-identity"><div class="talent-record-name"><button type="button" data-employee-profile data-employee-id="${escapeHtml(id)}">${highlightSearch(employee.name || "Employee", query)}</button><span class="talent-status ${stage}">${stages[stage] || "Active"}</span></div>
+        <p>${highlightSearch(employee.current_designation || employee.currentDesignation || employee.designation || "Employee", query)}${employee.current_company || employee.currentCompany ? ` at ${highlightSearch(employee.current_company || employee.currentCompany, query)}` : ""}</p>
+        <div class="talent-record-meta"><span>${icon("BriefcaseBusiness")}${escapeHtml(formatExperience(employee.experience))}</span><span>${icon("MapPin")}${highlightSearch(employee.location || "Not provided", query)}</span></div>
+        <div class="talent-record-contact">${icon("Mail")}<span>${highlightSearch(employee.email || employee.phone || "Contact not provided", query)}</span></div>
+      </div>
+      <div class="talent-record-details"><div class="talent-record-facts"><div><small>Current CTC</small><strong>${escapeHtml(employee.current_ctc || "--")}</strong></div><div><small>Expected CTC</small><strong>${escapeHtml(employee.expected_ctc || "--")}</strong></div><div><small>Notice Period</small><strong>${escapeHtml(employee.notice_period || "--")}</strong></div></div>
+        <div class="talent-skill-tags">${shownSkills.map(skill => `<span>${highlightSearch(skill, query)}</span>`).join("")}${skills.length > 4 ? `<button type="button" data-talent-skills="${escapeHtml(id)}" aria-label="${expanded ? "Show fewer" : "Show more"} skills">${expanded ? "Less" : `+${skills.length - 4}`}</button>` : ""}${!skills.length ? `<small>Skills not provided</small>` : ""}</div>
+      </div>
+      <div class="talent-record-actions"><div class="talent-record-updated"><small>${workflow.interviewAt ? `Interview ${escapeHtml(new Date(workflow.interviewAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }))}` : date ? `Updated ${date}` : "Employee record"}</small><details class="talent-record-menu"><summary class="talent-icon-button" title="Candidate actions" aria-label="Candidate actions">${icon("EllipsisVertical")}</summary><div class="talent-menu-content"><button type="button" data-employee-email="${escapeHtml(employee.email)}" ${!employee.email ? "disabled" : ""}>${icon("Mail")}Email candidate</button><button type="button" data-talent-reopen="${escapeHtml(id)}">${icon("RotateCcw")}Set active</button></div></details></div>
+        <div class="talent-record-buttons"><button class="talent-button" type="button" data-employee-profile data-employee-id="${escapeHtml(id)}">View Profile</button><button class="talent-button primary" type="button" data-talent-transition="${nextStage}" data-employee-id="${escapeHtml(id)}">${action}</button></div>
+      </div>
+    </article>`;
+  }).join("");
+  bindEmployeeCardActions();
+  target.querySelectorAll("[data-talent-select]").forEach(input => input.addEventListener("change", () => {
+    if (input.checked) state.hrTalentSelected.add(input.dataset.talentSelect);
+    else state.hrTalentSelected.delete(input.dataset.talentSelect);
+    updateTalentSelection();
+  }));
+  target.querySelectorAll("[data-talent-transition]").forEach(button => button.addEventListener("click", () => {
+    if (button.dataset.talentTransition === "interview") return openTalentInterview(button.dataset.employeeId);
+    setTalentStage(button.dataset.employeeId, button.dataset.talentTransition);
+  }));
+  target.querySelectorAll("[data-talent-reopen]").forEach(button => button.addEventListener("click", () => setTalentStage(button.dataset.talentReopen, "active")));
+  target.querySelectorAll("[data-talent-skills]").forEach(button => button.addEventListener("click", () => {
+    const id = button.dataset.talentSkills;
+    if (state.expandedEmployeeSkills.has(id)) state.expandedEmployeeSkills.delete(id);
+    else state.expandedEmployeeSkills.add(id);
+    renderTalentRecords(state.hrEmployees);
+  }));
+  updateTalentSelection();
+}
+
+function setTalentStage(id, stage, interviewAt = "") {
+  const pipeline = loadRoleWorkspace(talentStorageKey("pipeline"), {});
+  if (stage === "active") delete pipeline[id];
+  else pipeline[id] = { stage, interviewAt, updatedAt: new Date().toISOString() };
+  saveRoleWorkspace(talentStorageKey("pipeline"), pipeline);
+  if (state.hrTalentStage !== "all") reloadTalentRecords();
+  else renderTalentRecords(state.hrEmployees);
+}
+
+function openTalentInterview(id) {
+  const employee = findHrEmployeeById(id);
+  const dialog = document.createElement("dialog");
+  dialog.className = "talent-interview-dialog";
+  dialog.innerHTML = `<form><h2>Schedule Interview</h2><p>${escapeHtml(employee?.name || "Candidate")}</p><label>Interview date and time<input type="datetime-local" required name="interviewAt"></label><div><button class="talent-button" type="button" data-cancel>Cancel</button><button class="talent-button primary" type="submit">Schedule Interview</button></div></form>`;
+  document.body.append(dialog);
+  dialog.querySelector("input").min = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  dialog.querySelector("[data-cancel]").addEventListener("click", () => dialog.close());
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.querySelector("form").addEventListener("submit", event => {
+    event.preventDefault();
+    setTalentStage(id, "interview", dialog.querySelector("input").value);
+    dialog.close();
+  });
+  dialog.showModal();
+}
+
+function updateTalentSelection() {
+  const bar = document.querySelector("[data-talent-selection]");
+  if (!bar) return;
+  bar.hidden = !state.hrTalentSelected.size;
+  bar.querySelector("span").textContent = `${state.hrTalentSelected.size} selected`;
+}
+
+function reloadTalentRecords() {
+  ++hrEmployeeRequestId;
+  state.hrTalentPage = 1;
+  state.hrTalentSelected.clear();
+  updateTalentSelection();
+  loadHrEmployees();
+}
+
+function clearTalentFilters() {
+  clearTimeout(hrEmployeeSearchTimer);
+  state.hrEmployeeSearchQuery = "";
+  state.hrAdvancedSearch = null;
+  state.hrCandidateSearchDraft = null;
+  state.hrAdvancedApplied = false;
+  state.hrTalentFilters = { locations: [], skills: [], experiences: [], company: "", designation: "", cv: "", sort: "relevance" };
+  state.hrTalentStage = "all";
+  state.hrShowDuplicates = false;
+  state.hrTalentPage = 1;
+  state.hrTalentSelected.clear();
+  renderHrDashboard(document.querySelector("#app"));
+}
+
+function bindTalentWorkspace() {
+  document.querySelectorAll("[data-open-candidate-search]").forEach(button => button.addEventListener("click", openAdvancedCandidateSearch));
+  document.querySelectorAll("[data-talent-view]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.talentView === state.hrTalentView)));
+  document.querySelectorAll("[data-talent-section]").forEach(button => button.addEventListener("click", () => {
+    clearTimeout(hrEmployeeSearchTimer);
+    if (state.hrTalentSection === "experienced") state.hrTalentFilters.experiences = [];
+    state.hrTalentSection = button.dataset.talentSection;
+    state.hrTalentStage = { shortlist: "shortlisted", interviews: "interview", offers: "hired" }[state.hrTalentSection] || "all";
+    if (state.hrTalentSection === "experienced") state.hrTalentFilters.experiences = ["2-*"];
+    state.hrTalentPage = 1;
+    state.hrTalentSelected.clear();
+    if (window.location.pathname !== "/hr/dashboard") history.pushState({}, "", "/hr/dashboard");
+    renderHrDashboard(document.querySelector("#app"));
+  }));
+  document.querySelector("[data-hr-search]")?.addEventListener("click", openAdvancedCandidateSearch);
+  document.querySelector("[data-hr-search]")?.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openAdvancedCandidateSearch();
+    }
+  });
+  document.querySelector(".talent-search-form")?.addEventListener("submit", event => {
+    event.preventDefault();
+    clearTimeout(hrEmployeeSearchTimer);
+    openAdvancedCandidateSearch();
+  });
+  document.querySelectorAll("[data-talent-checkbox]").forEach(input => input.addEventListener("change", () => {
+    const key = input.dataset.talentCheckbox;
+    state.hrTalentFilters[key] = [...document.querySelectorAll(`[data-talent-checkbox="${key}"]:checked`)].map(item => item.value);
+    const quick = document.querySelector(`[data-talent-quick-filter="${key}"]`);
+    if (quick) quick.value = state.hrTalentFilters[key].length === 1 ? state.hrTalentFilters[key][0] : "";
+    reloadTalentRecords();
+  }));
+  document.querySelectorAll("[data-talent-quick-filter]").forEach(select => select.addEventListener("change", () => {
+    const key = select.dataset.talentQuickFilter;
+    state.hrTalentFilters[key] = select.value ? [select.value] : [];
+    document.querySelectorAll(`[data-talent-checkbox="${key}"]`).forEach(input => { input.checked = input.value === select.value; });
+    reloadTalentRecords();
+  }));
+  document.querySelectorAll("[data-talent-filter]").forEach(input => input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => {
+    state.hrTalentFilters[input.dataset.talentFilter] = input.value;
+    ++hrEmployeeRequestId;
+    clearTimeout(hrEmployeeSearchTimer);
+    hrEmployeeSearchTimer = setTimeout(reloadTalentRecords, input.tagName === "SELECT" ? 0 : 300);
+  }));
+  document.querySelectorAll("[data-filter-options]").forEach(input => input.addEventListener("input", () => {
+    document.querySelectorAll(`[data-filter-option-list="${input.dataset.filterOptions}"] label`).forEach(label => { label.hidden = !label.textContent.toLowerCase().includes(input.value.toLowerCase()); });
+  }));
+  document.querySelectorAll("[data-clear-talent-filters]").forEach(button => button.addEventListener("click", clearTalentFilters));
+  document.querySelectorAll("[data-talent-stage]").forEach(button => button.addEventListener("click", () => {
+    state.hrTalentStage = button.dataset.talentStage;
+    document.querySelectorAll("[data-talent-stage]").forEach(item => item.classList.toggle("active", item === button));
+    reloadTalentRecords();
+  }));
+  document.querySelectorAll("[data-talent-page]").forEach(button => button.addEventListener("click", () => {
+    clearTimeout(hrEmployeeSearchTimer);
+    state.hrTalentPage += Number(button.dataset.talentPage);
+    state.hrTalentSelected.clear();
+    updateTalentSelection();
+    loadHrEmployees();
+    document.querySelector(".talent-results-toolbar")?.scrollIntoView({ block: "nearest" });
+  }));
+  document.querySelectorAll("[data-talent-view]").forEach(button => button.addEventListener("click", () => {
+    state.hrTalentView = button.dataset.talentView;
+    document.querySelectorAll("[data-talent-view]").forEach(item => {
+      item.classList.toggle("active", item === button);
+      item.setAttribute("aria-pressed", String(item === button));
+    });
+    renderTalentRecords(state.hrEmployees);
+  }));
+  document.querySelector("[data-more-talent-filters]")?.addEventListener("click", () => {
+    const panel = document.querySelector(".talent-more-filters");
+    panel.hidden = !panel.hidden;
+  });
+  document.querySelector("[data-toggle-talent-filters]")?.addEventListener("click", () => document.querySelector(".talent-layout").classList.toggle("show-filters"));
+  document.querySelector("[data-clear-talent-selection]")?.addEventListener("click", () => {
+    state.hrTalentSelected.clear();
+    renderTalentRecords(state.hrEmployees);
+  });
+  document.querySelector("[data-bulk-shortlist]")?.addEventListener("click", () => {
+    const pipeline = loadRoleWorkspace(talentStorageKey("pipeline"), {});
+    for (const id of state.hrTalentSelected) pipeline[id] = { stage: "shortlisted", updatedAt: new Date().toISOString() };
+    saveRoleWorkspace(talentStorageKey("pipeline"), pipeline);
+    state.hrTalentSelected.clear();
+    if (state.hrTalentStage !== "all") reloadTalentRecords();
+    else renderTalentRecords(state.hrEmployees);
+  });
+  document.querySelector("[data-export-talent]")?.addEventListener("click", () => {
+    const rows = [["Name", "Email", "Phone", "Location", "Experience", "Skills"], ...state.hrEmployees.filter((employee, index) => state.hrTalentSelected.has(employeeRecordId(employee, index))).map(employee => [employee.name, employee.email, employee.phone, employee.location, employee.experience, employee.keywords])];
+    const csv = rows.map(row => row.map(value => `"${String(value ?? "").replace(/^[=+@\-\t\r]/, "'$&").replaceAll('"', '""')}"`).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "talme-candidates.csv";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  document.querySelector("[data-save-talent-search]")?.addEventListener("click", () => {
+    const saved = loadRoleWorkspace(talentStorageKey("searches"), []);
+    saved.push({ name: state.hrEmployeeSearchQuery || [...state.hrTalentFilters.skills, ...state.hrTalentFilters.locations].join(", ") || `Search ${saved.length + 1}`, query: state.hrEmployeeSearchQuery, filters: structuredClone(state.hrTalentFilters), advanced: state.hrAdvancedApplied ? structuredClone(state.hrAdvancedSearch) : null });
+    saveRoleWorkspace(talentStorageKey("searches"), saved.slice(-15));
+    renderHrDashboard(document.querySelector("#app"));
+  });
+  document.querySelectorAll("[data-saved-talent-search]").forEach(button => button.addEventListener("click", () => {
+    const saved = loadRoleWorkspace(talentStorageKey("searches"), [])[Number(button.dataset.savedTalentSearch)];
+    if (!saved) return;
+    state.hrEmployeeSearchQuery = saved.query;
+    state.hrAdvancedApplied = Boolean(saved.advanced);
+    state.hrAdvancedSearch = saved.advanced ? structuredClone(saved.advanced) : null;
+    state.hrCandidateSearchDraft = saved.advanced ? structuredClone(saved.advanced) : null;
+    state.hrTalentFilters = structuredClone(saved.filters);
+    state.hrTalentPage = 1;
+    state.hrTalentStage = "all";
+    renderHrDashboard(document.querySelector("#app"));
+  }));
+  document.querySelector("[data-talent-theme]")?.addEventListener("change", event => {
+    state.theme = event.target.value;
+    localStorage.setItem("talme_theme", state.theme);
+    document.body.classList.toggle("dark", state.theme === "dark");
+  });
+  updateTalentSummary();
 }
 
 function duplicateHrEmployees(items) {
@@ -2113,225 +2399,33 @@ function findHrEmployeeById(employeeId) {
 function navigateHrEmployeeProfile(employee, employeeId = employeeRecordId(employee)) {
   const routeId = encodeURIComponent(employeeId || employeeRecordId(employee));
   history.pushState({}, "", `/hr/employees/${routeId}`);
-  renderHrEmployeeProfile(document.querySelector("#app"), employee);
+  renderHrEmployeeRoute(window.location.pathname);
 }
 
 async function renderHrEmployeeRoute(pathname) {
   const root = document.querySelector("#app");
-  if (!state.accessToken || !state.user) {
-    return renderLandingPage();
-  }
-  if (!state.user?.permissions?.includes("employees.manage") && !state.user?.permissions?.includes("*")) {
-    return renderForbidden("403 Forbidden");
-  }
-
+  if (!state.accessToken || !state.user) return renderLandingPage();
+  if (!state.user.permissions?.includes("employees.manage") && !state.user.permissions?.includes("*")) return renderForbidden("403 Forbidden");
   const employeeId = decodeURIComponent(pathname.split("/").filter(Boolean).pop() || "");
-  root.innerHTML = h`
-    <main class="site role-app hr-app">
-      ${roleTopbar("Talme HR Workspace", "HR Manager", "/hr/dashboard")}
-      <section class="candidate-profile-wrap">
-        <div class="security-empty">Loading employee details...</div>
-      </section>
-    </main>
-  `;
-  bindRoleDashboard("hr");
-
+  renderEmployeeProfileLoading(root);
+  stopHrEmployeesLive();
   try {
-    if (!state.hrEmployees.length) await fetchHrEmployees();
-    const employee = findHrEmployeeById(employeeId);
-    if (!employee) {
-      root.querySelector(".candidate-profile-wrap").innerHTML = `
-        <button class="btn candidate-back" data-back-hr>${icon("arrow")} Back to results</button>
-        <div class="security-empty">Employee details were not found.</div>
-      `;
-      document.querySelector("[data-back-hr]")?.addEventListener("click", () => navigate("/hr/dashboard"));
-      return;
-    }
-    renderHrEmployeeProfile(root, employee);
+    const payload = await api(`/api/hr/employees/${encodeURIComponent(employeeId)}`);
+    if (window.location.pathname !== pathname) return;
+    if (!payload.employee) throw new Error("Employee details were not found.");
+    const index = state.hrEmployees.findIndex(employee => employeeRecordId(employee) === employeeRecordId(payload.employee));
+    if (index >= 0) state.hrEmployees[index] = payload.employee;
+    else state.hrEmployees.push(payload.employee);
+    renderHrEmployeeProfile(root, payload.employee);
   } catch (error) {
-    root.querySelector(".candidate-profile-wrap").innerHTML = `
-      <button class="btn candidate-back" data-back-hr>${icon("arrow")} Back to results</button>
-      <div class="security-empty">${escapeHtml(error.message)}</div>
-    `;
-    document.querySelector("[data-back-hr]")?.addEventListener("click", () => navigate("/hr/dashboard"));
+    if (window.location.pathname === pathname) renderEmployeeProfileLoading(root, error.message, true);
   }
 }
 
 function renderHrEmployeeProfile(root, employee, options = {}) {
-  const isEditing = Boolean(options.edit);
-  const activeTab = options.tab || "profile";
-  const statusMessage = options.status || "";
-  const name = employee.name || employee.fullName || "Employee";
-  const email = employee.email || "";
-  const phone = employee.phone || "";
-  const location = employee.location || "Location not added";
-  const designation = employee.current_designation || employee.currentDesignation || employee.designation || "Employee";
-  const company = employee.current_company || employee.currentCompany || "";
-  const currentRole = `${designation}${company ? ` at ${company}` : ""}`;
-  const skills = employeeSkills(employee.keywords);
-  const topSkills = skills.slice(0, 4);
-  const summarySkills = topSkills.length ? ` with ${topSkills.join(", ")}` : "";
-  const detailRows = [
-    ["Employee code", employee.employee_code || employee.employeeCode],
-    ["Name", name],
-    ["Email", email],
-    ["Phone", phone],
-    ["Location", employee.location],
-    ["Experience", formatExperience(employee.experience)],
-    ["Designation", designation],
-    ["Department", employee.department],
-    ["Current company", company],
-    ["CV file", employee.cv_file_name || employee.cvFileName],
-    ["Source", employee.source],
-    ["Row number", employee.rowNumber]
-  ];
-
-  root.innerHTML = h`
-    <main class="site role-app hr-app candidate-profile-page">
-      ${roleTopbar("Talme HR Workspace", "HR Manager", "/hr/dashboard")}
-      <section class="candidate-profile-wrap">
-        <button class="btn candidate-back" data-back-hr>${icon("arrow")} Back to results</button>
-
-        <article class="candidate-profile-card">
-          <div class="candidate-profile-avatar">${escapeHtml(profileInitials(name))}</div>
-          <div class="candidate-profile-main">
-            <div class="candidate-profile-title">
-              <h1>${escapeHtml(name)}</h1>
-              <button class="link-button" type="button" data-employee-edit>${isEditing ? "Cancel" : "Edit"}</button>
-            </div>
-            <div class="candidate-profile-meta">
-              <span>${icon("key")} ${escapeHtml(formatExperience(employee.experience))}</span>
-              <span>${icon("shield")} ${escapeHtml(phone || "Phone not added")}</span>
-              <span>${icon("search")} ${escapeHtml(location)}</span>
-            </div>
-            <div class="candidate-profile-facts">
-              <span>Current</span>
-              <strong>${escapeHtml(currentRole)}</strong>
-              <small>${escapeHtml(company || "Current company not added")}</small>
-              <span>Department</span>
-              <strong>${escapeHtml(employee.department || "Department not added")}</strong>
-              <small>${escapeHtml(employee.employee_code || employee.employeeCode || "Employee code not added")}</small>
-              <span>Email</span>
-              <strong>${escapeHtml(email || "Email not added")}</strong>
-              <small></small>
-            </div>
-            <div class="profile-actions">
-              <button class="btn" type="button" data-employee-profile-call>${icon("shield")} Call employee</button>
-              <button class="btn success" type="button" data-employee-profile-email>Email employee</button>
-            </div>
-            <div class="profile-contact">
-              <span>${escapeHtml(email || "Email not added")}</span>
-              <span class="candidate-phone-value" data-employee-profile-phone hidden></span>
-              <b>Employee record</b>
-            </div>
-            ${employeeAuditLine(employee) ? `<div class="employee-audit-line profile-audit-line">${escapeHtml(employeeAuditLine(employee))}</div>` : ""}
-          </div>
-          <div class="profile-timeline">
-            <span>Profile</span>
-            <span>${escapeHtml(employee.source || "Database")}</span>
-            <span>${escapeHtml(employee.rowNumber ? `Row ${employee.rowNumber}` : "Active")}</span>
-            <span>HR</span>
-          </div>
-        </article>
-
-        <div class="candidate-profile-stats">
-          <span>${icon("eye")} Active</span>
-          <span>${icon("arrow")} HR</span>
-          <span>CV</span>
-          <span>${escapeHtml(employee.cv_file_name || employee.cvFileName || "No CV attached")}</span>
-          <span>${escapeHtml(location)}</span>
-        </div>
-
-        <section class="profile-detail-card">
-          <div class="profile-tabs">
-            <button class="${activeTab === "profile" ? "active" : ""}" type="button" data-employee-tab="profile">Profile detail</button>
-            <button class="${activeTab === "cv" ? "active" : ""}" type="button" data-employee-tab="cv">Attached CV</button>
-          </div>
-          ${statusMessage ? `<p class="notice ok employee-edit-notice">${escapeHtml(statusMessage)}</p>` : ""}
-          ${isEditing ? employeeEditForm(employee) : activeTab === "cv" ? employeeAttachedCv(employee) : employeeProfileDetails(employee, { name, email, phone, location, designation, company, currentRole, skills, summarySkills, detailRows })}
-        </section>
-      </section>
-    </main>
-  `;
-
-  bindRoleDashboard("hr");
-  document.querySelector("[data-back-hr]")?.addEventListener("click", () => navigate("/hr/dashboard"));
-  bindEmployeeProfileActions(employee, isEditing, activeTab);
-  if (!isEditing && activeTab === "cv") loadEmployeeCvPreview(employee);
+  renderEmployeeProfileWorkspace(root, employee, options);
 }
 
-function employeeProfileDetails(employee, view) {
-  return `
-          <div class="profile-summary-note">
-            ${escapeHtml(view.currentRole)}${escapeHtml(view.summarySkills)}
-          </div>
-
-          <section class="profile-section">
-            <h2>Key skills</h2>
-            <div class="profile-chip-list">
-              ${view.skills.length ? view.skills.map(skill => `<span>${escapeHtml(skill)}</span>`).join("") : "<span>Skills not added</span>"}
-            </div>
-          </section>
-
-          <section class="profile-section">
-            <h2>Work summary</h2>
-            <p>${escapeHtml(view.name)} is listed as ${escapeHtml(view.currentRole)} with ${escapeHtml(formatExperience(employee.experience))} of experience in ${escapeHtml(view.location)}.</p>
-            <div class="profile-detail-grid">
-              <span>Industry</span><strong>${escapeHtml(employee.department || "Not added")}</strong>
-              <span>Role</span><strong>${escapeHtml(view.designation)}</strong>
-              <span>Company</span><strong>${escapeHtml(view.company || "Not added")}</strong>
-            </div>
-          </section>
-
-          <section class="profile-section">
-            <h2>Employee details</h2>
-            <div class="profile-detail-grid">
-              ${view.detailRows.map(([label, value]) => `
-                <span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "Not added")}</strong>
-              `).join("")}
-            </div>
-          </section>
-
-          <section class="profile-section">
-            <h2>Update history</h2>
-            <div class="profile-detail-grid update-history-grid">
-              <span>Last update</span><strong>${escapeHtml(employeeAuditLine(employee) || "No update history recorded yet")}</strong>
-              <span>Created by</span><strong>${escapeHtml(employeeAuditAccount(employee.created_by_name, employee.created_by_email) || "Not recorded")}</strong>
-              <span>Created at</span><strong>${escapeHtml(formatEmployeeAuditDate(employee.created_at_audit) || "Not recorded")}</strong>
-            </div>
-          </section>
-
-          <section class="profile-section">
-            <h2>Contact details</h2>
-            <div class="profile-detail-grid">
-              <span>Email</span><strong>${escapeHtml(view.email || "Not added")}</strong>
-              <span>Phone</span><strong>${escapeHtml(view.phone || "Not added")}</strong>
-              <span>Location</span><strong>${escapeHtml(view.location)}</strong>
-            </div>
-          </section>
-
-  `;
-}
-
-function employeeAttachedCv(employee) {
-  const fileName = employee.cv_file_name || employee.cvFileName || "";
-  const hasStoredFile = Boolean(employee.cv_stored_name || employee.cvStoredName);
-  return `
-    <section class="profile-section">
-      <h2>Attached CV</h2>
-      ${fileName ? `<p>${escapeHtml(fileName)}</p>` : "<p>No attached CV was uploaded for this employee.</p>"}
-      ${hasStoredFile ? `
-        <div class="cv-preview" data-cv-preview>
-          <div class="security-empty">Loading CV...</div>
-        </div>
-      ` : `
-        <div class="cv-preview empty">
-          <div class="security-empty">No CV file is available to preview.</div>
-        </div>
-      `}
-    </section>
-  `;
-}
 
 function employeeEditForm(employee) {
   const value = field => escapeHtml(employee[field] || "");
@@ -2423,54 +2517,6 @@ function updateHrEmployeeInState(employeeId, updatedEmployee) {
   }
 }
 
-async function loadEmployeeCvPreview(employee) {
-  const target = document.querySelector("[data-cv-preview]");
-  if (!target) return;
-  const employeeId = employeeRecordId(employee);
-  try {
-    const response = await fetch(`/api/hr/employees/${encodeURIComponent(employeeId)}/cv`, {
-      headers: state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || "Unable to load CV");
-    }
-    const blob = await response.blob();
-    const objectUrl = URL.createObjectURL(blob);
-    const fileName = employee.cv_file_name || employee.cvFileName || "employee-cv";
-    const extension = fileName.split(".").pop().toLowerCase();
-    if (extension === "pdf") {
-      target.innerHTML = `
-        <iframe class="cv-frame" src="${objectUrl}" title="${escapeHtml(fileName)}"></iframe>
-        <div class="cv-actions">
-          <a class="btn primary" href="${objectUrl}" download="${escapeHtml(fileName)}">${icon("arrow")}Download CV</a>
-        </div>
-      `;
-      return;
-    }
-    const previewResponse = extension === "docx"
-      ? await fetch(`/api/hr/employees/${encodeURIComponent(employeeId)}/cv-preview`, {
-        headers: state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}
-      })
-      : null;
-    const previewPayload = previewResponse?.ok ? await previewResponse.json() : null;
-    const previewText = previewPayload?.text || "Preview is not available for this file type.";
-    target.innerHTML = `
-      <div class="cv-document-preview">
-        <div class="cv-document-head">
-          <strong>${escapeHtml(fileName)}</strong>
-        </div>
-        <pre>${escapeHtml(previewText)}</pre>
-      </div>
-      <div class="cv-actions">
-        <a class="btn" href="${objectUrl}" target="_blank" rel="noopener">${icon("arrow")}Open CV</a>
-        <a class="btn primary" href="${objectUrl}" download="${escapeHtml(fileName)}">${icon("arrow")}Download CV</a>
-      </div>
-    `;
-  } catch (error) {
-    target.innerHTML = `<div class="security-empty">${escapeHtml(error.message)}</div>`;
-  }
-}
 
 function bindEmployeeProfileActions(employee, isEditing = false, activeTab = "profile") {
   const phone = String(employee.phone || "").trim();
@@ -2488,16 +2534,18 @@ function bindEmployeeProfileActions(employee, isEditing = false, activeTab = "pr
     }
   };
 
-  document.querySelector("[data-employee-profile-call]")?.addEventListener("click", event => {
-    revealPhone(event.currentTarget);
+  document.querySelectorAll("[data-employee-profile-call]").forEach(button => button.addEventListener("click", event => {
+    if (!document.querySelector(".employee-profile-workspace")) revealPhone(event.currentTarget);
     if (phone) window.location.href = `tel:${phone}`;
-  });
-  document.querySelector("[data-employee-profile-email]")?.addEventListener("click", () => {
+  }));
+  document.querySelectorAll("[data-employee-profile-email]").forEach(button => button.addEventListener("click", () => {
     if (email) window.location.href = `mailto:${email}?subject=${encodeURIComponent(`Regarding your profile, ${employee.name || "employee"}`)}`;
-  });
-  document.querySelector("[data-employee-edit]")?.addEventListener("click", () => {
+  }));
+  document.querySelectorAll("[data-employee-edit]").forEach(button => button.addEventListener("click", () => {
+    const field = button.dataset.employeeEditFocus;
     renderHrEmployeeProfile(document.querySelector("#app"), employee, { edit: !isEditing, tab: activeTab });
-  });
+    if (field && !isEditing) document.querySelector(`[data-employee-edit-form] [name="${field}"]`)?.focus();
+  }));
   document.querySelectorAll("[data-employee-tab]").forEach(button => {
     button.addEventListener("click", () => {
       renderHrEmployeeProfile(document.querySelector("#app"), employee, { tab: button.dataset.employeeTab || "profile" });
@@ -2528,7 +2576,7 @@ function bindEmployeeProfileActions(employee, isEditing = false, activeTab = "pr
   });
 }
 
-function bindRoleDashboard(scope) {
+function bindRoleDashboard(scope, options = {}) {
   if (scope !== "admin" && securityMonitorTimer) {
     clearInterval(securityMonitorTimer);
     securityMonitorTimer = null;
@@ -2545,7 +2593,7 @@ function bindRoleDashboard(scope) {
   document.querySelectorAll("[data-open-add-employee]").forEach(button => button.addEventListener("click", openEmployeeAdd));
   document.querySelector("[data-show-duplicates]")?.addEventListener("click", async event => {
     state.hrShowDuplicates = !state.hrShowDuplicates;
-    state.hrEmployeeVisibleCount = 50;
+    state.hrEmployeeVisibleCount = document.querySelector(".talent-app") ? 20 : 50;
     event.currentTarget.classList.toggle("active", state.hrShowDuplicates);
     if (!state.hrEmployees.length) await fetchHrEmployees();
     renderHrEmployees();
@@ -2553,6 +2601,7 @@ function bindRoleDashboard(scope) {
   document.querySelector("[data-open-import]")?.addEventListener("click", openCandidateImport);
   document.querySelector('[data-security-action="registeredDevices"]')?.addEventListener("click", loadRegisteredDevices);
   document.querySelector("[data-hr-search]")?.addEventListener("input", event => {
+    if (document.querySelector(".talent-app")) return;
     state.hrEmployeeSearchQuery = event.target.value;
     state.hrEmployeeVisibleCount = 50;
     clearTimeout(hrEmployeeSearchTimer);
@@ -2578,7 +2627,7 @@ function bindRoleDashboard(scope) {
     notice.className = "notice ok";
   });
   if (scope === "hr" && document.querySelector("[data-hr-employees]")) {
-    loadHrEmployees();
+    if (!options.skipEmployeeLoad) loadHrEmployees();
     startHrEmployeesLive();
   }
 }
@@ -2631,6 +2680,7 @@ function startSecurityMonitor() {
 }
 
 async function loadSecurityMonitor() {
+  if (document.querySelector(".admin-control")) return loadAdminControlMonitor();
   try {
     const payload = await api("/api/admin/security/live");
     for (const [key, value] of Object.entries(payload.stats || {})) {

@@ -17,13 +17,32 @@ model AuthUser {
   role         String
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
-  isActive     Boolean  @default(true) @map("is_active")
+  isActive     Boolean  @default(false) @map("is_active")
+  approvalStatus String @default("PENDING") @map("approval_status")
+  deletedAt    DateTime? @map("deleted_at")
+  registrationReviews AuthRegistrationReview[] @relation("RegistrationTarget")
+  reviewedRegistrations AuthRegistrationReview[] @relation("RegistrationReviewer")
   passwordOtps AuthPasswordOtp[]
   createdEmployeeAudits EmployeeRecordAudit[] @relation("EmployeeAuditCreatedBy")
   lastEditedEmployeeAudits EmployeeRecordAudit[] @relation("EmployeeAuditLastEditedBy")
 
   @@index([email, role])
+  @@index([approvalStatus], map: "auth_users_approval_status_idx")
   @@map("auth_users")
+}
+
+model AuthRegistrationReview {
+  id BigInt @id @default(autoincrement())
+  authUserId BigInt @map("auth_user_id")
+  reviewerAuthUserId BigInt? @map("reviewer_auth_user_id")
+  previousStatus String @map("previous_status")
+  status String
+  createdAt DateTime @default(now()) @map("created_at")
+  authUser AuthUser @relation("RegistrationTarget", fields: [authUserId], references: [id], onDelete: Cascade)
+  reviewer AuthUser? @relation("RegistrationReviewer", fields: [reviewerAuthUserId], references: [id], onDelete: SetNull)
+
+  @@index([authUserId, createdAt], map: "auth_registration_reviews_user_idx")
+  @@map("auth_registration_reviews")
 }
 
 model AuthSession {
@@ -43,6 +62,15 @@ model AuthSession {
 
   @@index([email])
   @@map("auth_sessions")
+}
+
+model AuthSecurityLimit {
+  key String @id
+  attempts Int @default(0)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+
+  @@index([expiresAt], map: "auth_security_limits_expiry_idx")
+  @@map("auth_security_limits")
 }
 
 model AuthPasswordOtp {

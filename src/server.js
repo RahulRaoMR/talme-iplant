@@ -34,6 +34,11 @@ const {
   hasPostgresAuth,
   findAuthUserByEmail,
   findAuthUsersByEmail,
+  getRegisteredUserCounts,
+  listRegisteredUsers,
+  reviewRegistration,
+  consumeSecurityLimit,
+  clearSecurityLimit,
   createAuthUser,
   verifyAuthPassword,
   createAuthSession,
@@ -53,6 +58,10 @@ const {
 } = require("./auth-store");
 const { requireEmailConfig, sendPasswordResetOtpEmail } = require("./email");
 const employeeStore = require("./employee-store");
+const { employeeFilters, matchesEmployeeFilters, sortEmployees } = require("./employee-search");
+const { adminActivity, adminTodayStats, adminDeviceStats } = require("./admin-monitor");
+const { recordIpLocation } = require("./ip-location");
+const { PENDING_MESSAGE, isApprovedAccount, registrationAccessMessage } = require("./registration-policy");
 
 initDb();
 
@@ -82,6 +91,8 @@ const REGISTRATION_ROLE_BY_TYPE = {
 function sendJson(res, statusCode, payload, headers = {}) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Pragma": "no-cache",
     ...headers
   });
   res.end(JSON.stringify(payload));
@@ -144,10 +155,16 @@ function enforceRateLimit(req, res) {
   res.setHeader("X-RateLimit-Limit", String(max));
   res.setHeader("X-RateLimit-Remaining", String(Math.max(max - bucket.count, 0)));
   if (bucket.count > max) {
+    res.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.resetAt - current) / 1000))));
     sendError(res, 429, "Too many requests. Please try again shortly.");
     return false;
   }
   return true;
+}
+
+function sendSecurityLimit(res, retryAfter, message) {
+  res.setHeader("Retry-After", String(retryAfter));
+  sendJson(res, 429, { success: false, error: message, message, retryAfter });
 }
 
 function getUserByEmail(email) {
@@ -216,6 +233,18 @@ function sanitizeUser(user, preferredRole = null) {
   };
 }
 
+function sanitizeAuthUser(user, authUser) {
+  const role = db.prepare("SELECT slug, name FROM roles WHERE slug = ?").get(authUser.role);
+  let permissions = db.prepare(`SELECT p.key FROM role_permissions rp
+    JOIN roles r ON r.id = rp.role_id JOIN permissions p ON p.id = rp.permission_id
+    WHERE r.slug = ?`).all(authUser.role).map(row => row.key);
+  if (permissions.includes("*")) permissions = db.prepare("SELECT key FROM permissions").all().map(row => row.key);
+  return { ...sanitizeUser(user), name: authUser.full_name, phone: authUser.phone,
+    authUserId: String(authUser.auth_user_id || authUser.id), approvalStatus: authUser.approval_status,
+    roles: role ? [role] : [], permissions, primaryRole: authUser.role,
+    redirectTo: ROLE_REDIRECTS[authUser.role] || "/" };
+}
+
 function audit(req, userId, actionType, metadata = {}, entityType = null, entityId = null) {
   const userAgent = req.headers["user-agent"] || "";
   db.prepare(`
@@ -236,19 +265,22 @@ function audit(req, userId, actionType, metadata = {}, entityType = null, entity
 
 function logLogin(req, user, success, action, reason = null, email = null) {
   const userAgent = req.headers["user-agent"] || "";
+  const ip = getIp(req);
+  const location = recordIpLocation(db, ip);
   db.prepare(`
-    INSERT INTO login_history (user_id, email, success, action, reason, ip_address, device, browser, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO login_history (user_id, email, success, action, reason, ip_address, device, browser, timestamp, location_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     user?.id || null,
     user?.email || email || null,
     success ? 1 : 0,
     action,
     reason,
-    getIp(req),
+    ip,
     getDeviceName(userAgent),
     getBrowser(userAgent),
-    now()
+    now(),
+    JSON.stringify(location)
   );
 }
 
@@ -310,10 +342,10 @@ function bearerPayload(req) {
   return verifyJwt(token);
 }
 
-async function persistentAuthContext(req, payload) {
+async function persistentAuthContext(req, payload, existingAuthSession = null) {
   if (!payload?.authSid) return null;
-  const authSession = await findAuthSessionByKey(payload.authSid);
-  if (!authSession?.is_active) return null;
+  const authSession = existingAuthSession || await findAuthSessionByKey(payload.authSid);
+  if (!isApprovedAccount(authSession)) return null;
   await touchAuthSession(payload.authSid).catch(() => {});
   const localUser = mirrorAuthUserToLocal({
     full_name: authSession.full_name,
@@ -325,7 +357,7 @@ async function persistentAuthContext(req, payload) {
   return {
     user: localUser,
     session: {
-      id: payload.sid,
+      id: null,
       authSessionKey: authSession.session_key,
       csrf_token: authSession.csrf_token,
       remember_me: authSession.remember_me,
@@ -333,22 +365,26 @@ async function persistentAuthContext(req, payload) {
       last_seen_at: authSession.last_seen_at
     },
     payload,
-    safeUser: sanitizeUser(localUser)
+    safeUser: sanitizeAuthUser(localUser, authSession)
   };
 }
 
 async function authenticate(req) {
   const payload = bearerPayload(req);
-  if (!payload?.sub || !payload?.sid) return null;
+  if (!payload?.sub || (!payload?.sid && !payload?.authSid)) return null;
+  if (hasPostgresAuth() && !payload.authSid) return null;
   const persistentSession = payload.authSid ? await findAuthSessionByKey(payload.authSid) : null;
-  if (payload.authSid && !persistentSession?.is_active) return null;
+  if (payload.authSid && !isApprovedAccount(persistentSession)) return null;
   const session = db.prepare(`
     SELECT * FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > ?
   `).get(Number(payload.sid), Number(payload.sub), now());
-  if (!session) return persistentAuthContext(req, payload);
+  if (!session || (persistentSession?.refresh_token_hash && session.refresh_token_hash !== persistentSession.refresh_token_hash)) {
+    return persistentAuthContext(req, payload, persistentSession);
+  }
   const stale = Date.now() - Date.parse(session.last_seen_at) > sessionTimeoutSeconds * 1000;
   if (stale && !session.remember_me) {
     db.prepare("UPDATE sessions SET revoked_at = ? WHERE id = ?").run(now(), session.id);
+    if (persistentSession) await revokeAuthSessionByKey(persistentSession.session_key);
     return null;
   }
   const seenAt = now();
@@ -358,7 +394,7 @@ async function authenticate(req) {
   }
   if (persistentSession?.session_key) await touchAuthSession(persistentSession.session_key).catch(() => {});
   const user = db.prepare("SELECT * FROM users WHERE id = ? AND status = 'active'").get(payload.sub);
-  if (!user) return persistentAuthContext(req, payload);
+  if (!user) return persistentAuthContext(req, payload, persistentSession);
   return {
     user,
     session: {
@@ -367,7 +403,7 @@ async function authenticate(req) {
       csrf_token: persistentSession?.csrf_token || session.csrf_token
     },
     payload,
-    safeUser: sanitizeUser(user)
+    safeUser: persistentSession ? sanitizeAuthUser(user, persistentSession) : sanitizeUser(user)
   };
 }
 
@@ -422,7 +458,7 @@ function validateCsrf(req, context) {
 function setRefreshCookie(res, refreshToken, maxAge) {
   res.setHeader("Set-Cookie", cookie("talme_refresh", refreshToken, {
     httpOnly: true,
-    secure: Boolean(process.env.VERCEL),
+    secure: isProductionRuntime,
     sameSite: "Strict",
     maxAge
   }));
@@ -431,7 +467,7 @@ function setRefreshCookie(res, refreshToken, maxAge) {
 function clearRefreshCookie(res) {
   res.setHeader("Set-Cookie", cookie("talme_refresh", "", {
     httpOnly: true,
-    secure: Boolean(process.env.VERCEL),
+    secure: isProductionRuntime,
     sameSite: "Strict",
     maxAge: 0
   }));
@@ -440,7 +476,7 @@ function clearRefreshCookie(res) {
 function clearResetCookie(res) {
   res.setHeader("Set-Cookie", cookie("talme_reset", "", {
     httpOnly: true,
-    secure: Boolean(process.env.VERCEL),
+    secure: isProductionRuntime,
     sameSite: "Strict",
     maxAge: 0
   }));
@@ -491,7 +527,7 @@ function mirrorAuthUserToLocal(authUser) {
   return db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
 }
 
-async function createAuthResponse(req, res, user, rememberMe = false, action = "Login", message = "Login successful.", preferredRole = null) {
+async function createAuthResponse(req, res, user, rememberMe = false, action = "Login", message = "Login successful.", preferredRole = null, authUser = null) {
   const session = createSession(req, user, rememberMe);
   await createAuthSession({
     sessionKey: session.authSessionKey,
@@ -512,40 +548,61 @@ async function createAuthResponse(req, res, user, rememberMe = false, action = "
     message,
     accessToken: session.accessToken,
     csrfToken: session.csrfToken,
-    user: sanitizeUser(user, preferredRole),
+    user: authUser ? sanitizeAuthUser(user, authUser) : sanitizeUser(user, preferredRole),
     expiresAt: session.expiresAt
   });
 }
 
 async function login(req, res) {
-  const body = await parseJsonBody(req);
+  const body = await parseJsonBody(req, 16 * 1024);
   const email = String(body.email || "").trim();
   const password = normalizeSubmittedPassword(body.password);
   const requestedRole = roleSlugFromAuthBody(body);
   if (!email || !password) {
+    logLogin(req, null, false, "Failed Login", "Email or password missing", email || null);
     return sendAuthFailure(res, 400, "Email and password are required.");
   }
   if (!requestedRole) {
+    logLogin(req, null, false, "Failed Login", "Login role missing", email);
     return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
   }
 
   if (!hasPostgresAuth()) {
     return sendAuthFailure(res, 500, "Authentication database is not configured.");
   }
+  const ipLimit = await consumeSecurityLimit(`login-ip:${sha256(getIp(req))}`, 8, 60);
+  if (!ipLimit.allowed) return sendSecurityLimit(res, ipLimit.retryAfter, "Too many login attempts. Please try again shortly.");
+  const failureKey = `login-fail:${sha256(JSON.stringify([email.toLowerCase(), requestedRole]))}`;
+  const failureLimit = await consumeSecurityLimit(failureKey, 5, 15 * 60);
+  const lockoutMessage = "Too many failed login attempts. Login is temporarily locked. Try again later or reset your password.";
+  if (!failureLimit.allowed) {
+    logLogin(req, null, false, "Failed Login", "Temporary login lockout", email);
+    return sendSecurityLimit(res, failureLimit.retryAfter, lockoutMessage);
+  }
+  const recordFailure = () => {
+    if (failureLimit.attempts >= 5) {
+      sendSecurityLimit(res, failureLimit.retryAfter, lockoutMessage);
+      return true;
+    }
+    return false;
+  };
   const authUsers = await findAuthUsersByEmail(email);
   const authUser = authUsers.find(candidate => candidate.role === requestedRole) || null;
   if (!authUser) {
     const anyRoleUser = authUsers[0] || null;
     logLogin(req, null, false, "Failed Login", anyRoleUser ? "Requested login role not registered" : "Account not found", email);
+    if (recordFailure()) return;
     return sendAuthFailure(res, anyRoleUser ? 403 : 404, anyRoleUser ? "This email is not registered for the selected login page." : "Account not found. Please register first.");
-  }
-  if (!authUser.is_active) {
-    logLogin(req, null, false, "Failed Login", "Account inactive", email);
-    return sendAuthFailure(res, 403, "Account is inactive.");
   }
   if (!await verifyAuthPassword(password, authUser.password_hash)) {
     logLogin(req, null, false, "Failed Login", "Incorrect password", email);
+    if (recordFailure()) return;
     return sendAuthFailure(res, 401, "Invalid password.");
+  }
+  await clearSecurityLimit(failureKey);
+  if (!isApprovedAccount(authUser)) {
+    logLogin(req, null, false, "Failed Login", `Registration ${authUser.approval_status || "unapproved"}`, email);
+    return sendAuthFailure(res, 403, registrationAccessMessage(authUser));
   }
   const user = mirrorAuthUserToLocal(authUser);
 
@@ -555,7 +612,7 @@ async function login(req, res) {
     logLogin(req, user, false, "Failed Login", reason, email);
     return sendAuthFailure(res, 403, body.role ? "This account is not registered for the selected login page." : "No role is assigned to your account");
   }
-  await createAuthResponse(req, res, user, Boolean(body.rememberMe), "Login", "Login successful.", loginRole);
+  await createAuthResponse(req, res, user, Boolean(body.rememberMe), "Login", "Login successful.", loginRole, authUser);
 }
 
 async function register(req, res) {
@@ -593,14 +650,16 @@ async function register(req, res) {
   if (!hasPostgresAuth()) {
     return sendAuthFailure(res, 500, "Authentication database is not configured.");
   }
-  if (await findAuthUserByEmail(email, roleSlug)) {
+  const existing = await findAuthUserByEmail(email, roleSlug);
+  if (existing?.approval_status === "DELETED") return sendAuthFailure(res, 403, registrationAccessMessage(existing));
+  if (existing) {
     return sendAuthFailure(res, 409, "This email is already registered for the selected login page.");
   }
-  const authUser = await createAuthUser({ fullName: name, email, phone, password, role: roleSlug });
-  mirrorAuthUserToLocal(authUser);
+  await createAuthUser({ fullName: name, email, phone, password, role: roleSlug });
   sendJson(res, 201, {
     success: true,
-    message: "Registration successful. Please login to continue."
+    approvalStatus: "PENDING",
+    message: PENDING_MESSAGE
   });
 }
 
@@ -620,6 +679,7 @@ async function forgotPassword(req, res) {
     return sendAuthFailure(res, anyRoleUser ? 403 : 404, anyRoleUser ? "Email address is not registered for the selected login page." : "Email address is not registered.");
   }
 
+  if (!isApprovedAccount(authUser)) return sendAuthFailure(res, 403, registrationAccessMessage(authUser));
   const recentRequests = await countRecentPasswordOtpRequests(email, new Date(Date.now() - 15 * 60 * 1000).toISOString());
   if (recentRequests >= 3) {
     return sendAuthFailure(res, 429, "Too many OTP requests. Please try again later.");
@@ -680,7 +740,7 @@ async function verifyForgotPasswordOtp(req, res) {
   if (!result.ok) return sendAuthFailure(res, 401, "Invalid OTP.");
   res.setHeader("Set-Cookie", cookie("talme_reset", resetToken, {
     httpOnly: true,
-    secure: Boolean(process.env.VERCEL),
+    secure: isProductionRuntime,
     sameSite: "Strict",
     maxAge: 10 * 60
   }));
@@ -723,6 +783,7 @@ async function resetPassword(req, res) {
   }
 
   const localUser = getUserByEmail(email);
+  await clearSecurityLimit(`login-fail:${sha256(JSON.stringify([email, roleSlug]))}`);
   if (localUser) {
     db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(password), now(), localUser.id);
     db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(now(), localUser.id);
@@ -748,6 +809,11 @@ async function refresh(req, res) {
   let user = session ? db.prepare("SELECT * FROM users WHERE id = ? AND status = 'active'").get(session.user_id) : null;
   let csrfToken = session?.csrf_token || "";
   const persistentSession = await findAuthSessionByRefreshHash(refreshHash).catch(() => null);
+  if (hasPostgresAuth() && !isApprovedAccount(persistentSession)) {
+    clearRefreshCookie(res);
+    return sendError(res, 401, "Your session is no longer authorized. Please log in again.");
+  }
+  if (persistentSession) user = mirrorAuthUserToLocal(persistentSession);
   let authSessionKey = persistentSession?.session_key || null;
   if (session && user) {
     const seenAt = now();
@@ -759,7 +825,7 @@ async function refresh(req, res) {
     if (persistentSession?.session_key) await touchAuthSession(persistentSession.session_key).catch(() => {});
   } else {
     const authSession = persistentSession;
-    if (!authSession?.is_active) return sendError(res, 401, "Refresh token invalid");
+    if (!isApprovedAccount(authSession)) return sendError(res, 401, "Refresh token invalid");
     await touchAuthSession(authSession.session_key).catch(() => {});
     user = mirrorAuthUserToLocal({
       full_name: authSession.full_name,
@@ -771,16 +837,17 @@ async function refresh(req, res) {
     csrfToken = authSession.csrf_token;
     authSessionKey = authSession.session_key;
   }
+  const safeUser = persistentSession ? sanitizeAuthUser(user, persistentSession) : sanitizeUser(user);
   const accessToken = signJwt({
     sub: user.id,
     sid: session?.id || 0,
     authSid: authSessionKey || undefined,
     email: user.email,
-    roles: rolesForUser(user.id).map(role => role.slug),
-    permissions: permissionsForUser(user.id),
+    roles: safeUser.roles.map(role => role.slug),
+    permissions: safeUser.permissions,
     csrf: csrfToken
   });
-  sendJson(res, 200, { accessToken, csrfToken, user: sanitizeUser(user) });
+  sendJson(res, 200, { accessToken, csrfToken, user: safeUser });
 }
 
 async function logout(req, res) {
@@ -840,6 +907,7 @@ async function logoutAll(req, res) {
   if (context.user.email) await revokeAuthSessionsByEmail(context.user.email).catch(() => {});
   clearRefreshCookie(res);
   audit(req, context.user.id, "Logout from All Devices");
+  logLogin(req, context.user, true, "Logout from All Devices");
   sendJson(res, 200, { message: "Logged out from all devices" });
 }
 
@@ -921,6 +989,48 @@ async function adminRegisteredDevices(req, res) {
   sendJson(res, 200, { items: rows });
 }
 
+async function adminRegisteredUsers(req, res) {
+  const context = await requireAuth(req, res, "admin.users.manage");
+  if (!context) return;
+  const items = await listRegisteredUsers();
+  if (items !== null) return sendJson(res, 200, { items });
+  return adminUsers(req, res);
+}
+
+async function adminReviewRegistration(req, res, id, status) {
+  const context = await requireAuth(req, res, "admin.users.manage");
+  if (!context) return;
+  const body = await parseJsonBody(req, 16 * 1024);
+  if (body.confirmed !== true) return sendError(res, 400, "Confirm this registration action before continuing.");
+  const actionLimit = await consumeSecurityLimit(`admin-review:${context.safeUser.authUserId}`, 20, 60);
+  if (!actionLimit.allowed) return sendSecurityLimit(res, actionLimit.retryAfter, "Too many admin actions. Please wait before trying again.");
+  const passwordLimitKey = `admin-password:${context.safeUser.authUserId}`;
+  let passwordLimit;
+  if (status === "DELETED") {
+    if (!body.currentPassword || !body.confirmationEmail) return sendError(res, 400, "Your password and the account's email are required to confirm deletion.");
+    passwordLimit = await consumeSecurityLimit(passwordLimitKey, 5, 15 * 60);
+    if (!passwordLimit.allowed) return sendSecurityLimit(res, passwordLimit.retryAfter, "Password verification is temporarily locked. Try again later.");
+  }
+  let result;
+  try {
+    result = await reviewRegistration({ id, status, actorSessionKey: context.session?.authSessionKey,
+      confirmed: body.confirmed, currentPassword: normalizeSubmittedPassword(body.currentPassword), confirmationEmail: body.confirmationEmail });
+  } catch (error) {
+    if (error.errorCode !== "PASSWORD_INVALID") throw error;
+    audit(req, context.user.id, "Admin Password Verification Failed", { status }, "auth_user", id);
+    if (passwordLimit.attempts >= 5) return sendSecurityLimit(res, passwordLimit.retryAfter, "Password verification is temporarily locked. Try again later.");
+    return sendJson(res, 403, { error: error.message, code: error.errorCode });
+  }
+  if (status === "DELETED") await clearSecurityLimit(passwordLimitKey);
+  for (const hash of result.revokedHashes) {
+    db.prepare("UPDATE sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND revoked_at IS NULL").run(now(), hash);
+  }
+  audit(req, context.user.id, "Registration Review", { status, role: result.user.roles }, "auth_user", id);
+  sendJson(res, 200, { success: true, user: result.user,
+    message: status === "APPROVED" ? "Registration approved. The user can now log in." :
+      status === "REJECTED" ? "Registration rejected. Login and existing sessions are blocked." : "Account deleted. Login and existing sessions are blocked." });
+}
+
 async function adminSecurityLive(req, res) {
   const context = await requireAuth(req, res);
   if (!context) return;
@@ -929,50 +1039,25 @@ async function adminSecurityLive(req, res) {
     return sendError(res, 403, "Forbidden");
   }
 
-  const today = new Date().toISOString().slice(0, 10);
-  const liveCutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const observedAt = new Date();
+  let monitoring;
+  try {
+    monitoring = adminActivity(db, new URL(req.url, "http://localhost").searchParams.get("days") || 7, observedAt);
+  } catch (error) {
+    if (error instanceof RangeError) return sendError(res, 400, error.message);
+    throw error;
+  }
+  const liveCutoff = new Date(observedAt.getTime() - 5 * 60 * 1000).toISOString();
   const activeSessionWhere = "revoked_at IS NULL AND expires_at > ?";
   const one = (sql, ...params) => db.prepare(sql).get(...params)?.value || 0;
+  const registeredUsers = await getRegisteredUserCounts();
 
   const stats = {
-    totalRegisteredUsers: one("SELECT COUNT(*) AS value FROM users"),
-    totalActiveUsers: one("SELECT COUNT(*) AS value FROM users WHERE status = 'active'"),
+    totalRegisteredUsers: registeredUsers?.totalRegisteredUsers ?? one("SELECT COUNT(*) AS value FROM users"),
+    totalActiveUsers: registeredUsers?.totalActiveUsers ?? one("SELECT COUNT(*) AS value FROM users WHERE status = 'active'"),
     liveOnlineUsers: one(`SELECT COUNT(DISTINCT user_id) AS value FROM sessions WHERE ${activeSessionWhere} AND last_seen_at >= ?`, now(), liveCutoff),
-    totalLoggedInToday: one("SELECT COUNT(*) AS value FROM login_history WHERE success = 1 AND date(timestamp) = date(?)", today),
-    totalLoggedOutToday: one("SELECT COUNT(*) AS value FROM login_history WHERE action IN ('Logout', 'Logout from All Devices') AND date(timestamp) = date(?)", today),
-    activeDevices: one(`SELECT COUNT(DISTINCT device_id) AS value FROM sessions WHERE ${activeSessionWhere} AND device_id IS NOT NULL`, now()),
-    mobileDevices: one(`
-      SELECT COUNT(DISTINCT s.device_id) AS value
-      FROM sessions s
-      JOIN devices d ON d.id = s.device_id
-      WHERE s.revoked_at IS NULL
-        AND s.expires_at > ?
-        AND (lower(d.user_agent) LIKE '%mobile%' OR lower(d.user_agent) LIKE '%iphone%' OR lower(d.user_agent) LIKE '%android%')
-        AND lower(d.user_agent) NOT LIKE '%ipad%'
-        AND lower(d.user_agent) NOT LIKE '%tablet%'
-    `, now()),
-    desktopDevices: one(`
-      SELECT COUNT(DISTINCT s.device_id) AS value
-      FROM sessions s
-      JOIN devices d ON d.id = s.device_id
-      WHERE s.revoked_at IS NULL
-        AND s.expires_at > ?
-        AND (lower(d.device) IN ('windows', 'macos', 'linux') OR lower(d.user_agent) LIKE '%windows%' OR lower(d.user_agent) LIKE '%macintosh%' OR lower(d.user_agent) LIKE '%linux%')
-        AND lower(d.user_agent) NOT LIKE '%mobile%'
-        AND lower(d.user_agent) NOT LIKE '%android%'
-        AND lower(d.user_agent) NOT LIKE '%iphone%'
-        AND lower(d.user_agent) NOT LIKE '%ipad%'
-        AND lower(d.user_agent) NOT LIKE '%tablet%'
-    `, now()),
-    tabletDevices: one(`
-      SELECT COUNT(DISTINCT s.device_id) AS value
-      FROM sessions s
-      JOIN devices d ON d.id = s.device_id
-      WHERE s.revoked_at IS NULL
-        AND s.expires_at > ?
-        AND (lower(d.user_agent) LIKE '%ipad%' OR lower(d.user_agent) LIKE '%tablet%')
-    `, now()),
-    failedLoginAttempts: one("SELECT COUNT(*) AS value FROM login_history WHERE success = 0 AND date(timestamp) = date(?)", today)
+    ...adminTodayStats(db, observedAt),
+    ...adminDeviceStats(db, observedAt)
   };
 
   const sessionDetails = db.prepare(`
@@ -1000,6 +1085,7 @@ async function adminSecurityLive(req, res) {
   const liveOnlineUsers = sessionDetails.filter(user => user.session_status === "Online");
 
   sendJson(res, 200, {
+    ...monitoring,
     stats,
     liveOnlineUsers,
     sessionDetails,
@@ -1127,6 +1213,31 @@ function paginateEmployees(items, query) {
   };
 }
 
+async function hrEmployeeLocations(req, res) {
+  const context = await requireAuth(req, res, "employees.manage");
+  if (!context) return;
+  if (await shouldUsePersistentHrEmployees()) {
+    return sendJson(res, 200, { items: await employeeStore.listEmployeeLocations() });
+  }
+  const localRows = db.prepare(`
+    SELECT ea.location FROM employee_accounts ea
+    JOIN user_roles ur ON ur.user_id = ea.user_id
+    JOIN roles r ON r.id = ur.role_id
+    WHERE r.slug = 'employee'
+  `).all();
+  const imported = readImportedEmployeesPayload();
+  const locations = new Map();
+  for (const employee of [...(Array.isArray(imported.items) ? imported.items : []), ...localRows]) {
+    const value = String(employee.location || "").trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    const item = locations.get(key) || { value, count: 0 };
+    item.count++;
+    locations.set(key, item);
+  }
+  sendJson(res, 200, { items: [...locations.values()].sort((a, b) => a.value.localeCompare(b.value)) });
+}
+
 async function searchHrEmployees(req, res) {
   const context = await requireAuth(req, res, "employees.manage");
   if (!context) return;
@@ -1159,8 +1270,10 @@ async function searchHrEmployees(req, res) {
     ...item,
     source: item.source || "imported-employees.json"
   }));
-  const items = [...importedItems, ...localRows]
-    .filter(employee => serverEmployeeMatchesSearch(employee, query.q || query.search || query.keyword || ""));
+  const filters = employeeFilters(query);
+  const items = sortEmployees([...importedItems, ...localRows]
+    .filter(employee => serverEmployeeMatchesSearch(employee, query.q || query.search || query.keyword || "")
+      && matchesEmployeeFilters(employee, filters)), filters.sort);
   const paginated = paginateEmployees(await attachEmployeeAudits(items), query);
   sendJson(res, 200, paginated);
 }
@@ -1773,6 +1886,9 @@ function employeeResponse(record) {
     id: record.id,
     employee_code: record.employee_code,
     name: record.name,
+    status: record.status,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
     email: record.email,
     phone: record.phone,
     designation: record.designation,
@@ -1808,6 +1924,31 @@ function findImportedEmployeeIndex(items, employeeId) {
     const keys = [item.id, item.employee_code, item.email, item.phone];
     return keys.some(key => String(key || "").toLowerCase() === id);
   });
+}
+
+async function hrEmployeeDetails(req, res, employeeId) {
+  const context = await requireAuth(req, res, "employees.manage");
+  if (!context) return;
+  const id = decodeURIComponent(String(employeeId || ""));
+  let employee;
+  if (await shouldUsePersistentHrEmployees()) {
+    employee = await employeeStore.findEmployeeByIdentifier(id);
+  } else {
+    const imported = readImportedEmployeesPayload();
+    const index = findImportedEmployeeIndex(imported.items, id);
+    employee = index >= 0 ? imported.items[index] : db.prepare(`
+      SELECT u.id, u.name, u.email, u.phone, u.status, u.created_at AS createdAt,
+             u.updated_at AS updatedAt, ea.employee_code, ea.designation, ea.department,
+             ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
+             ea.cv_file_name, ea.cv_stored_name
+      FROM employee_accounts ea JOIN users u ON u.id = ea.user_id
+      WHERE u.id = ? OR ea.employee_code = ? OR lower(u.email) = lower(?) OR u.phone = ?
+      LIMIT 1
+    `).get(Number(id) || -1, id, id, id);
+  }
+  if (!employee) return sendError(res, 404, "Employee not found");
+  const [audited] = await attachEmployeeAudits([employee]);
+  sendJson(res, 200, { employee: employeeResponse(audited) });
 }
 
 async function findEmployeeCvRecord(employeeId) {
@@ -2852,6 +2993,7 @@ const routes = {
   "GET /api/auth/devices": deviceHistory,
   "GET /api/audit-logs": auditLogs,
   "GET /api/admin/users": adminUsers,
+  "GET /api/admin/registered-users": adminRegisteredUsers,
   "GET /api/admin/registered-devices": adminRegisteredDevices,
   "GET /api/admin/security/live": adminSecurityLive,
   "POST /api/candidates": createCandidateRecord,
@@ -2864,6 +3006,7 @@ const routes = {
   "GET /api/hr/employees": hrEmployees,
   "GET /api/hr/imported-employees": importedHrEmployees,
   "GET /api/hr/employees/search": searchHrEmployees,
+  "GET /api/hr/employees/locations": hrEmployeeLocations,
   "POST /api/hr/employees": createEmployee,
   "GET /api/candidate/applications": candidateApplications
 };
@@ -2875,6 +3018,10 @@ async function requestHandler(req, res) {
   if (!enforceRateLimit(req, res)) return;
   try {
     if (routes[routeKey]) return await routes[routeKey](req, res);
+    const registrationAction = url.pathname.match(/^\/api\/admin\/registered-users\/([1-9]\d{0,18})(?:\/(approve|reject))?$/);
+    if (registrationAction && ((req.method === "POST" && registrationAction[2]) || (req.method === "DELETE" && !registrationAction[2]))) {
+      return await adminReviewRegistration(req, res, registrationAction[1], req.method === "DELETE" ? "DELETED" : registrationAction[2] === "approve" ? "APPROVED" : "REJECTED");
+    }
     if (req.method === "GET" && url.pathname.startsWith("/api/hr/employees/") && url.pathname.endsWith("/cv-preview")) {
       const employeeId = url.pathname.slice("/api/hr/employees/".length, -"/cv-preview".length);
       return await hrEmployeeCvPreview(req, res, employeeId);
@@ -2882,6 +3029,9 @@ async function requestHandler(req, res) {
     if (req.method === "GET" && url.pathname.startsWith("/api/hr/employees/") && url.pathname.endsWith("/cv")) {
       const employeeId = url.pathname.slice("/api/hr/employees/".length, -"/cv".length);
       return await hrEmployeeCv(req, res, employeeId);
+    }
+    if (req.method === "GET" && /^\/api\/hr\/employees\/[^/]+$/.test(url.pathname)) {
+      return await hrEmployeeDetails(req, res, url.pathname.slice("/api/hr/employees/".length));
     }
     if ((req.method === "PUT" || req.method === "PATCH") && url.pathname.startsWith("/api/hr/employees/")) {
       return await updateHrEmployee(req, res, url.pathname.slice("/api/hr/employees/".length));

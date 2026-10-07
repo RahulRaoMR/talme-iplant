@@ -1,5 +1,6 @@
 const { Pool } = require("pg");
 const { loadLocalEnv } = require("./load-env");
+const { employeeFilters, employeeFilterSql, employeeOrderSql } = require("./employee-search");
 
 loadLocalEnv();
 
@@ -79,6 +80,8 @@ function rowToEmployee(row) {
     record_db_id: row.id == null ? null : Number(row.id),
     employee_code: row.employee_code,
     name: row.name,
+    status: row.status,
+    createdAt: row.source_created_at || row.created_at,
     email: row.email || "",
     phone: row.phone || "",
     designation: row.designation,
@@ -228,6 +231,9 @@ async function searchEmployees(query = {}) {
   const like = `%${q.toLowerCase()}%`;
   const terms = searchTerms(q);
   const where = ["e.archived_at IS NULL"];
+  const params = [q, like, terms, limit, offset];
+  const filters = employeeFilters(query);
+  where.push(...employeeFilterSql(filters, params));
 
   if (q) {
     where.push(`(
@@ -280,9 +286,9 @@ async function searchEmployees(query = {}) {
         AND (employee_skill.resume_id IS NULL OR latest_resume.id IS NULL OR employee_skill.resume_id = latest_resume.id)
     ) skill_set ON TRUE
     WHERE ${where.join(" AND ")}
-    ORDER BY search_rank DESC, e.name ASC, e.id ASC
+    ORDER BY ${employeeOrderSql(filters.sort)}
     LIMIT $4 OFFSET $5
-  `, [q, like, terms, limit, offset]);
+  `, params);
 
   const total = Number(result.rows[0]?.total_count || 0);
   return {
@@ -294,6 +300,18 @@ async function searchEmployees(query = {}) {
       totalPages: Math.ceil(total / limit)
     }
   };
+}
+
+async function listEmployeeLocations() {
+  await requireEmployeeTables();
+  const result = await pool.query(`
+    SELECT MIN(BTRIM(location)) AS value, COUNT(*)::int AS count
+    FROM hr_employee_records
+    WHERE archived_at IS NULL AND NULLIF(BTRIM(location), '') IS NOT NULL
+    GROUP BY LOWER(BTRIM(location))
+    ORDER BY LOWER(MIN(BTRIM(location)))
+  `);
+  return result.rows;
 }
 
 async function listEmployees() {
@@ -362,16 +380,26 @@ async function findEmployeeByIdentifier(identifier) {
   await requireEmployeeTables();
   const id = String(identifier || "");
   const result = await pool.query(`
-    SELECT ${employeeSelect}
-    FROM hr_employee_records
-    WHERE archived_at IS NULL
+    SELECT ${employeeSearchSelect}
+    FROM hr_employee_records e
+    LEFT JOIN LATERAL (
+      SELECT resume.* FROM hr_employee_resumes resume
+      WHERE resume.employee_record_id = e.id AND resume.is_latest = TRUE
+      ORDER BY resume.uploaded_at DESC, resume.id DESC LIMIT 1
+    ) latest_resume ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT array_agg(DISTINCT skill.skill_name) AS skills
+      FROM employee_skills employee_skill JOIN skills skill ON skill.id = employee_skill.skill_id
+      WHERE employee_skill.employee_record_id = e.id
+    ) skill_set ON TRUE
+    WHERE e.archived_at IS NULL
       AND (
-        source_id = $1
-        OR employee_code = $1
-        OR LOWER(email) = LOWER($1)
-        OR phone = $1
+        e.source_id = $1
+        OR e.employee_code = $1
+        OR LOWER(e.email) = LOWER($1)
+        OR e.phone = $1
       )
-    ORDER BY CASE WHEN source_id = $1 THEN 0 ELSE 1 END, id
+    ORDER BY CASE WHEN e.source_id = $1 THEN 0 ELSE 1 END, e.id
     LIMIT 1
   `, [id]);
   return rowToEmployee(result.rows[0]);
@@ -720,7 +748,7 @@ async function finalizeUploadImport(client, importId, { summary, failedRows, dup
   ]);
 }
 
-async function saveUploadedEmployeesImport({ records, failedRows = [], totalRows = 0, source }) {
+async function saveUploadedEmployeesImport({ records, failedRows = [], totalRows = 0, source, skipExisting = false }) {
   await requireEmployeeTables();
   const client = await pool.connect();
   const summary = {
@@ -751,6 +779,17 @@ async function saveUploadedEmployeesImport({ records, failedRows = [], totalRows
         await lockUploadIdentities(client, record);
         const existing = matchingUploadIdentity(identityMap, record)
           || await matchingUploadRecord(client, record.data.email, record.data.phone, record.data.employeeCode);
+        if (existing && skipExisting) {
+          const duplicate = { rowNumber: record.rowNumber, reasons: ["Duplicate already present in portal; existing record left unchanged"] };
+          allFailedRows.push(duplicate);
+          duplicateRows.push(duplicate);
+          summary.failed += 1;
+          summary.skipped += 1;
+          summary.duplicates += 1;
+          summary.duplicateCount += 1;
+          await client.query("RELEASE SAVEPOINT upload_employee_row");
+          continue;
+        }
         const saved = await upsertEmployeeRecord(client, uploadedEmployeePayload(record, source, existing), importId);
         await replaceEmployeeSkills(client, saved.recordId, await latestResumeId(client, saved.recordId), record.data.keywords);
         if (saved.created) summary.created += 1;
@@ -936,6 +975,7 @@ module.exports = {
   listEmployees,
   listImportedEmployees,
   searchEmployees,
+  listEmployeeLocations,
   publicProfileCount,
   findEmployeeByIdentifier,
   analyzeUploadedEmployees,

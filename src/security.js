@@ -63,8 +63,14 @@ function signJwt(payload, expiresInSeconds = accessTokenTtlSeconds) {
 
 function verifyJwt(token) {
   try {
-    const [encodedHeader, encodedPayload, signature] = String(token || "").split(".");
+    const raw = String(token || "");
+    if (raw.length > 8192) return null;
+    const parts = raw.split(".");
+    if (parts.length !== 3 || parts.some(part => !/^[A-Za-z0-9_-]+$/.test(part))) return null;
+    const [encodedHeader, encodedPayload, signature] = parts;
     if (!encodedHeader || !encodedPayload || !signature) return null;
+    const header = JSON.parse(Buffer.from(encodedHeader, "base64url").toString("utf8"));
+    if (header.alg !== "HS256" || header.typ !== "JWT") return null;
     const unsigned = `${encodedHeader}.${encodedPayload}`;
     const expected = crypto.createHmac("sha256", jwtSecret).update(unsigned).digest("base64url");
     const signatureBuffer = Buffer.from(signature);
@@ -72,7 +78,10 @@ function verifyJwt(token) {
     if (signatureBuffer.length !== expectedBuffer.length) return null;
     if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) return null;
     const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+    if (!Number.isInteger(payload.exp) || !Number.isInteger(payload.iat) || payload.exp <= now || payload.exp <= payload.iat || payload.iat > now + 30) return null;
+    if (payload.nbf !== undefined && (!Number.isInteger(payload.nbf) || payload.nbf > now)) return null;
     return payload;
   } catch {
     return null;
@@ -99,7 +108,7 @@ function cookie(name, value, options = {}) {
 }
 
 function getIp(req) {
-  return (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown").toString().split(",")[0].trim();
+  return require("./ip-location").getClientIp(req);
 }
 
 function getBrowser(userAgent = "") {
@@ -110,7 +119,16 @@ function getBrowser(userAgent = "") {
   return "Unknown";
 }
 
+function getDeviceType(userAgent = "", device = "") {
+  if (/ipad|tablet|playbook|kindle|silk/i.test(userAgent) || /ipad|tablet/i.test(device)
+    || (/android/i.test(userAgent) && !/mobile/i.test(userAgent))) return "tablet";
+  if (/mobile|iphone|ipod|windows phone/i.test(userAgent) || /iphone|mobile/i.test(device)) return "mobile";
+  if (/windows|macintosh|mac os|linux|cros/i.test(userAgent) || /windows|macos|linux|desktop/i.test(device)) return "desktop";
+  return "other";
+}
+
 function getDeviceName(userAgent = "") {
+  if (getDeviceType(userAgent) === "tablet") return /ipad/i.test(userAgent) ? "iPad" : /android/i.test(userAgent) ? "Android Tablet" : "Tablet";
   if (/Windows/i.test(userAgent)) return "Windows";
   if (/Macintosh|Mac OS/i.test(userAgent)) return "macOS";
   if (/Android/i.test(userAgent)) return "Android";
@@ -136,5 +154,6 @@ module.exports = {
   getIp,
   getBrowser,
   getDeviceName,
+  getDeviceType,
   validatePassword
 };

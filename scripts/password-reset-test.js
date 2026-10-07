@@ -29,14 +29,7 @@ global.fetch = async (url, options = {}) => {
   };
 };
 
-const { requestHandler } = require("../src/server");
-const { deleteAuthUserByEmail, closeAuthStore } = require("../src/auth-store");
-const { db } = require("../src/db");
-
-const directPool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL.includes("sslmode=require") ? { rejectUnauthorized: false } : undefined
-});
+let requestHandler, deleteAuthUserByEmail, closeAuthStore, db, directPool;
 
 function call(method, url, payload, headers = {}) {
   const body = payload == null ? "" : JSON.stringify(payload);
@@ -148,6 +141,11 @@ async function assertRestartPersistence(email, password) {
 }
 
 async function main() {
+  const fixture = await require("./auth-test-database").createAuthTestDatabase();
+  ({ requestHandler } = require("../src/server"));
+  ({ deleteAuthUserByEmail, closeAuthStore } = require("../src/auth-store"));
+  ({ db } = require("../src/db"));
+  directPool = fixture.pool;
   const email = `reset-test-${Date.now()}@talme.test`;
   const missingEmail = `missing-reset-${Date.now()}@talme.test`;
   const phone = `6${String(Date.now()).slice(-9)}`;
@@ -164,6 +162,7 @@ async function main() {
       confirmPassword: oldPassword
     });
     assert(registration.status === 201, `Expected registration 201, got ${registration.status}`);
+    await directPool.query("UPDATE auth_users SET approval_status = 'APPROVED', is_active = true WHERE email = $1 AND role = 'hr_manager'", [email]);
 
     const missing = await call("POST", "/api/auth/forgot-password", { email: missingEmail, role: "hr_manager" });
     assert(missing.status === 404, `Expected unregistered email 404, got ${missing.status}`);
@@ -196,6 +195,9 @@ async function main() {
     assert(reusedOtp.status === 401, `Expected reused OTP 401, got ${reusedOtp.status}`);
     assert(reusedOtp.body.message === "Invalid OTP.", "Expected reused OTP invalid message");
 
+    const { sha256 } = require("../src/security");
+    const limitKey = `login-fail:${sha256(JSON.stringify([email, "hr_manager"]))}`;
+    for (let i = 0; i < 5; i++) await require("../src/auth-store").consumeSecurityLimit(limitKey, 5, 900);
     const reset = await call("POST", "/api/auth/reset-password", {
       email,
       role: "hr_manager",
@@ -204,6 +206,7 @@ async function main() {
     }, { cookie: resetCookie });
     assert(reset.status === 200, `Expected reset password 200, got ${reset.status}`);
     assert(reset.body.message === "Password reset successfully. You can now login with your new password.", "Expected reset success message");
+    assert(await require("../src/auth-store").getSecurityLimit(limitKey, 1) === 0, "Verified password reset must clear the login lockout");
 
     const reusedPassword = `Again-${Date.now()}-Aa1!`;
     const reusedResetCookie = await call("POST", "/api/auth/reset-password", {
@@ -256,8 +259,9 @@ async function main() {
   } finally {
     await deleteAuthUserByEmail(email).catch(() => {});
     db.prepare("DELETE FROM users WHERE lower(email) = lower(?)").run(email);
-    await directPool.end().catch(() => {});
     await closeAuthStore().catch(() => {});
+    db.close();
+    await fixture.close();
   }
 }
 

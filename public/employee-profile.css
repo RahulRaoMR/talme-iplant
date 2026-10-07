@@ -1,0 +1,184 @@
+.employee-profile-workspace { max-width: 1640px; margin: 0 auto; padding: 0 22px 22px; color: var(--text); font-size: 13px; min-height: 100vh; }
+.employee-profile-workspace *, .employee-cv-dialog * { box-sizing: border-box; letter-spacing: 0; }
+.employee-profile-workspace [hidden] { display: none !important; }
+.employee-profile-workspace svg, .employee-cv-dialog svg { flex-shrink: 0; width: 17px; height: 17px; }
+.employee-profile-workspace button, .employee-cv-dialog button { color: inherit; cursor: pointer; }
+.employee-profile-workspace button:disabled, .employee-cv-dialog button:disabled { opacity: .45; cursor: default; }
+.employee-profile-workspace button:focus-visible, .employee-profile-workspace a:focus-visible, .employee-profile-workspace summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+.employee-profile-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 67px; padding: 12px 0; }
+.employee-profile-toolbar nav { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
+.employee-profile-toolbar nav button { border: 0; padding: 4px 0; color: #0864ed; font-weight: 600; background: none; font-size: 12px; }
+.employee-profile-toolbar nav svg { width: 14px; }
+.employee-profile-actions { display: flex; align-items: center; gap: 8px; }
+.employee-profile-button { display: inline-flex; justify-content: center; align-items: center; gap: 8px; text-decoration: none; padding: 9px 13px; min-height: 35px; border: 1px solid var(--line); background: var(--surface); border-radius: 5px; color: #1665dc !important; font-size: 12px; white-space: nowrap; }
+.employee-profile-button:hover:not(:disabled) { border-color: #87b0f6; }
+.employee-profile-button.primary { background: #0872f9; color: white !important; border-color: #0872f9; }
+.employee-profile-button svg { width: 15px; height: 15px; }
+.employee-profile-more { position: relative; }
+.employee-profile-more summary { list-style: none; cursor: pointer; }
+.employee-profile-more summary::-webkit-details-marker { display: none; }
+.employee-profile-more > div { position: absolute; right: 0; top: calc(100% + 6px); width: 205px; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: var(--shadow); z-index: 5; }
+.employee-profile-more > div button { border: 0; background: none; font-size: 12px; display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 10px; border-radius: 4px; }
+.employee-profile-more > div button:hover { background: var(--surface-2); }
+.employee-profile-identity { display: flex; align-items: center; gap: 20px; padding: 21px 18px; background: var(--surface); border-bottom: 1px solid var(--line); min-height: 143px; }
+.employee-profile-avatar { display: grid; place-items: center; width: 97px; height: 97px; border-radius: 7px; flex: 0 0 97px; background: #e3effe; color: #2565df; font-size: 30px; font-weight: 700; }
+.employee-profile-person { min-width: 0; flex: 1; }
+.employee-profile-name { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.employee-profile-name h1 { font-size: 23px; margin: 0; line-height: 1.3; overflow-wrap: anywhere; }
+.employee-profile-status { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); padding: 4px 7px; border-radius: 4px; background: var(--surface-2); }
+.employee-profile-status.active { color: #079580; background: #e4f9f2; }
+.employee-profile-status svg { width: 12px; height: 12px; }
+.employee-profile-person > p { color: var(--muted); font-size: 12px; margin: 8px 0; overflow-wrap: anywhere; }
+.employee-profile-secondary, .employee-profile-contact-meta { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-top: 9px; color: var(--muted); font-size: 11px; }
+.employee-profile-contact-meta { color: var(--text); }
+.employee-profile-secondary > span, .employee-profile-contact-meta > span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.employee-profile-secondary svg, .employee-profile-contact-meta svg { width: 13px; height: 13px; color: var(--muted); }
+.employee-profile-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; width: 420px; max-width: 40%; flex-shrink: 0; }
+.employee-profile-summary > div { display: flex; gap: 9px; align-items: center; padding: 13px 10px; min-height: 67px; background: var(--surface-2); border-radius: 5px; min-width: 0; }
+.employee-profile-summary strong { font-size: 11px; line-height: 1.4; font-weight: 600; display: block; overflow-wrap: anywhere; }
+.employee-profile-summary small { color: var(--muted); font-size: 10px; margin-top: 5px; display: block; }
+.employee-fact-icon { display: grid; place-items: center; width: 35px; height: 35px; border-radius: 5px; flex: 0 0 35px; }
+.employee-fact-icon.blue { background: #e4eeff; color: #1266f6; }
+.employee-fact-icon.violet { background: #efe8ff; color: #7c43ec; }
+.employee-fact-icon.amber { background: #fff0de; color: #ee8a20; }
+.employee-fact-icon.green { background: #e2f8f1; color: #12ac8d; }
+.employee-profile-tabs { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); background: var(--surface); margin: 14px 0; overflow-x: auto; }
+.employee-profile-tabs button { display: flex; align-items: center; justify-content: center; gap: 9px; flex: 1 0 auto; border: 0; border-bottom: 2px solid transparent; padding: 14px; min-height: 46px; background: none; font-size: 12px; color: var(--muted); }
+.employee-profile-tabs button.active { border-bottom-color: #1671fc; color: #0b68ef; background: #f0f7ff; }
+.employee-profile-tabs button svg { width: 15px; height: 15px; }
+.employee-profile-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(245px, .77fr); gap: 14px; align-items: stretch; }
+.employee-info-panel { position: relative; min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.employee-info-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 16px; min-height: 23px; }
+.employee-info-panel h2 { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 13px; font-weight: 650; line-height: 1.3; }
+.employee-info-panel h2 svg { width: 19px; height: 19px; color: #0872f9; }
+.employee-inline-edit { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 4px; padding: 4px 7px; background: var(--surface); font-size: 10px; color: #0864ed !important; }
+.employee-inline-edit svg { width: 12px; height: 12px; }
+.employee-info-list { display: grid; grid-template-columns: minmax(85px, .65fr) minmax(0, 1fr); gap: 12px 12px; margin: 0; font-size: 12px; line-height: 1.4; }
+.employee-info-list dt { color: var(--muted); }
+.employee-info-list dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-weight: 500; }
+.employee-info-list dd.missing { color: var(--muted); font-weight: 400; }
+.employee-profile-sidebar { display: flex; flex-direction: column; gap: 14px; min-width: 0; grid-column: 3; grid-row: 1 / 3; }
+.employee-profile-sidebar > section:last-child { flex: 1; }
+.employee-personal { grid-column: 1; grid-row: 1; }
+.employee-employment { grid-column: 2; grid-row: 1; }
+.employee-work-summary { grid-column: 1 / 3; grid-row: 2; }
+.employee-skills { grid-column: 1; grid-row: 3; }
+.employee-contact { grid-column: 2; grid-row: 3; }
+.employee-additional { grid-column: 3; grid-row: 3; }
+.employee-additional .employee-info-list { gap: 8px 10px; font-size: 11px; }
+.employee-cv-file { display: flex; gap: 12px; align-items: center; min-height: 65px; padding: 9px 0 12px; border-bottom: 1px solid var(--line); }
+.employee-cv-file > div { min-width: 0; }
+.employee-cv-file strong { font-size: 12px; overflow-wrap: anywhere; display: block; }
+.employee-cv-file > div > small { display: block; font-size: 10px; margin-top: 6px; color: var(--muted); }
+.employee-file-symbol { flex: 0 0 34px; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 34px; height: 43px; border-radius: 4px; color: white; background: #f23e4b; }
+.employee-file-symbol svg { width: 20px; height: 20px; }
+.employee-file-symbol small { font-size: 8px; margin-top: 1px; }
+.employee-cv-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.employee-cv-controls .employee-profile-button { min-width: 0; padding: 8px 6px; font-size: 10px; gap: 6px; }
+.employee-add-cv { display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: none; font-size: 11px; color: var(--brand) !important; margin: 12px auto 0; }
+.employee-cv-status { font-size: 11px; color: #c53c4d; margin: 10px 0 0; }
+.employee-cv-status:empty { display: none; }
+.employee-history-all { position: absolute; top: 20px; right: 16px; border: 0; background: none; color: #0b69ee !important; font-size: 10px; }
+.employee-update-timeline { list-style: none; margin: 0; padding: 2px 0 0 10px; }
+.employee-update-timeline li { position: relative; padding: 0 0 18px 15px; border-left: 1px solid var(--line); }
+.employee-update-timeline li:last-child { padding-bottom: 0; }
+.employee-update-timeline li::before { content: ""; width: 9px; height: 9px; border-radius: 50%; position: absolute; left: -5px; top: 3px; background: #09b6a0; }
+.employee-update-timeline li.edited::before { background: #1874fa; }
+.employee-update-timeline li > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 7px; }
+.employee-update-timeline strong { font-size: 11px; font-weight: 600; }
+.employee-update-timeline time { font-size: 9px; color: var(--muted); }
+.employee-update-timeline li > small { display: block; font-size: 10px; color: var(--muted); margin-top: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.employee-history-empty { min-height: 95px; display: flex; align-items: center; color: var(--muted); font-size: 12px; }
+.employee-work-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.employee-work-facts > div { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.employee-work-facts > div > span:last-child { min-width: 0; }
+.employee-work-facts strong { display: block; overflow-wrap: anywhere; font-size: 11px; line-height: 1.4; }
+.employee-work-facts small { display: block; color: var(--muted); font-size: 10px; margin-top: 5px; }
+.employee-skill-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.employee-skill-list span { font-size: 11px; color: #185ccb; background: #eaf2ff; padding: 5px 9px; border-radius: 4px; overflow-wrap: anywhere; max-width: 100%; }
+.employee-skill-list .missing { color: var(--muted); background: var(--surface-2); }
+.employee-add-skills { display: flex; margin-left: auto; font-size: 10px; padding: 7px 9px; min-height: 29px; }
+.employee-contact-list { display: grid; gap: 14px; font-size: 11px; }
+.employee-contact-list > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.employee-contact-list > div > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.employee-contact-list svg { color: #218ba4; width: 15px; height: 15px; }
+.employee-contact-list button, .employee-contact-list a { border: 0; background: none; text-decoration: none; font-size: 10px; color: #0864ed; white-space: nowrap; padding: 0; }
+.employee-profile-empty { min-height: 310px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; gap: 13px; background: var(--surface); color: var(--muted); text-align: center; }
+.employee-profile-empty > svg { width: 33px; height: 33px; color: #879cb9; }
+.employee-profile-empty h2 { font-size: 16px; font-weight: 500; }
+.employee-work-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.employee-work-detail-grid .employee-work-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 25px; }
+.employee-documents-layout { max-width: 550px; }
+.employee-profile-notice, .employee-profile-copy-status { color: #0c8164; padding: 12px; font-size: 12px; margin: 12px 0 0; border: 1px solid #b6e9d3; border-radius: 5px; background: #edfff7; }
+.employee-profile-editor { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 22px; }
+.employee-profile-editor .profile-section { padding: 0; border: 0; margin: 0; }
+.employee-profile-editor h2 { font-size: 17px; margin: 0 0 20px; }
+.employee-profile-editor .field { min-width: 0; }
+.employee-profile-editor .field span { font-size: 12px; }
+.employee-profile-editor .field input, .employee-profile-editor .field textarea { font-size: 13px; min-width: 0; width: 100%; border-radius: 5px; }
+.employee-profile-editor .employee-edit-grid { gap: 18px; }
+.employee-profile-editor .field-hint { font-size: 10px; }
+.employee-profile-editor .employee-edit-actions { margin-top: 18px; }
+.employee-cv-dialog { width: min(950px, calc(100% - 24px)); height: min(830px, calc(100% - 32px)); max-width: none; max-height: none; border: 1px solid var(--line); border-radius: 7px; padding: 0; color: var(--text); background: var(--surface); }
+.employee-cv-dialog::backdrop { background: #11182780; }
+.employee-cv-dialog[open] { display: flex; flex-direction: column; }
+.employee-cv-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.employee-cv-dialog h2 { display: flex; align-items: center; gap: 9px; font-size: 14px; margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.employee-cv-dialog > header button { flex-shrink: 0; }
+.employee-cv-dialog footer { display: flex; align-items: center; gap: 15px; padding: 12px 18px; border-top: 1px solid var(--line); }
+.employee-cv-dialog footer p { font-size: 12px; }
+.employee-cv-view { flex: 1; min-height: 0; overflow: auto; padding: 18px; font-size: 13px; }
+.employee-cv-view:has(iframe) { padding: 0; }
+.employee-cv-view iframe { display: block; width: 100%; height: 100%; border: 0; }
+.employee-cv-view pre { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+body.dark .employee-profile-tabs button.active { background: #223b59; color: #81b6ff; }
+body.dark .employee-profile-avatar { background: #233b58; color: #91baff; }
+body.dark .employee-profile-summary > div { background: var(--surface-2); }
+body.dark .employee-profile-notice, body.dark .employee-profile-copy-status { background: #173d32; color: #80ddbe; border-color: #28634f; }
+@media (max-width: 1100px) {
+  .employee-profile-summary { width: 360px; }
+  .employee-profile-identity { flex-wrap: wrap; }
+  .employee-profile-summary { width: 100%; max-width: none; padding-left: 117px; }
+  .employee-profile-summary > div { padding: 9px; }
+  .employee-profile-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .employee-profile-sidebar { grid-column: 1 / -1; grid-row: 4; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .employee-additional { grid-column: 1 / -1; grid-row: 5; }
+  .employee-additional .employee-info-list { grid-template-columns: 140px minmax(0, 1fr); }
+  .employee-skills { grid-column: 1; }
+  .employee-contact { grid-column: 2; }
+}
+@media (max-width: 650px) {
+  .employee-profile-workspace { padding: 0 12px 18px; }
+  .employee-profile-toolbar { flex-wrap: wrap; gap: 14px; padding: 17px 0; }
+  .employee-profile-actions { gap: 6px; flex-wrap: wrap; width: 100%; }
+  .employee-profile-actions .employee-profile-button { padding: 8px 10px; gap: 5px; font-size: 11px; }
+  .employee-profile-identity { gap: 13px; padding: 15px 12px; align-items: start; }
+  .employee-profile-avatar { width: 64px; height: 64px; flex-basis: 64px; font-size: 23px; }
+  .employee-profile-name { gap: 7px; }
+  .employee-profile-name h1 { font-size: 20px; }
+  .employee-profile-person { flex-basis: calc(100% - 77px); }
+  .employee-profile-secondary, .employee-profile-contact-meta { gap: 8px; font-size: 10px; }
+  .employee-profile-summary { padding-left: 0; gap: 7px; }
+  .employee-profile-summary > div { flex-direction: column; align-items: start; gap: 6px; }
+  .employee-profile-summary strong { font-size: 10px; }
+  .employee-profile-summary small { font-size: 9px; }
+  .employee-fact-icon { width: 30px; height: 30px; flex-basis: 30px; }
+  .employee-profile-tabs { margin: 12px 0; }
+  .employee-profile-tabs button { padding: 12px; font-size: 11px; }
+  .employee-profile-grid { display: flex; flex-direction: column; gap: 12px; }
+  .employee-personal { order: 1; }
+  .employee-employment { order: 2; }
+  .employee-work-summary { order: 3; }
+  .employee-skills { order: 4; }
+  .employee-contact { order: 5; }
+  .employee-profile-sidebar { order: 6; display: flex; }
+  .employee-additional { order: 7; }
+  .employee-work-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+  .employee-info-panel { padding: 14px; }
+  .employee-info-list { grid-template-columns: 102px minmax(0, 1fr); gap: 11px; font-size: 11px; }
+  .employee-additional .employee-info-list { grid-template-columns: 115px minmax(0, 1fr); }
+  .employee-work-detail-grid { grid-template-columns: 1fr; }
+  .employee-profile-editor { padding: 15px; }
+  .employee-profile-editor .employee-edit-grid { grid-template-columns: minmax(0, 1fr); }
+  .employee-profile-editor .candidate-add-wide { grid-column: auto; }
+}

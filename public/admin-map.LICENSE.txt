@@ -1,0 +1,4 @@
+admin-world-map.png is rendered from Natural Earth 1:110m country boundaries,
+redistributed by world-atlas 2.0.2. Natural Earth data is public domain.
+Source: https://www.naturalearthdata.com/about/terms-of-use/
+Topology: https://github.com/topojson/world-atlas

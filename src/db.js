@@ -4,6 +4,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { dbPath } = require("./config");
 const { ROLE_DEFINITIONS, PERMISSIONS } = require("./rbac");
 const { hashPassword } = require("./security");
+const { ensureIpLocationTable } = require("./ip-location");
 
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new DatabaseSync(dbPath);
@@ -229,6 +230,10 @@ function migrate() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
     );
   `);
+
+  ensureIpLocationTable(db);
+  const historyColumns = db.prepare("PRAGMA table_info(login_history)").all().map(column => column.name);
+  if (!historyColumns.includes("location_json")) db.exec("ALTER TABLE login_history ADD COLUMN location_json TEXT");
 
   const candidateColumns = db.prepare("PRAGMA table_info(candidate_records)").all().map(column => column.name);
   if (!candidateColumns.includes("cv_file_name")) {
