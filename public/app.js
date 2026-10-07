@@ -3,7 +3,7 @@ const state = {
   csrfToken: sessionStorage.getItem("talme_csrf") || "",
   user: null,
   authMode: "login",
-  selectedRole: "super_admin",
+  selectedRole: "hr_manager",
   forgotEmail: "",
   theme: localStorage.getItem("talme_theme") || "light",
   candidateImportId: "",
@@ -24,8 +24,8 @@ localStorage.removeItem("talme_csrf");
 localStorage.removeItem("talme_accounts");
 
 const roleTabs = [
-  ["super_admin", "Admin"],
-  ["hr_manager", "Talme HR"]
+  ["hr_manager", "Talme HR"],
+  ["super_admin", "Admin"]
 ];
 
 const registerTypes = [
@@ -78,6 +78,9 @@ function h(strings, ...values) {
 }
 
 function icon(name) {
+  const aliases = { arrow: "ArrowRight", logout: "LogOut", checkCircle: "CircleCheck", eyeOff: "EyeOff", search: "Search", users: "Users", shield: "ShieldCheck", key: "KeyRound", x: "X", moon: "Moon", sun: "Sun", lock: "LockKeyhole" };
+  const lucideIcon = window.lucide?.icons?.[aliases[name] || name];
+  if (lucideIcon) return window.lucide.createElement(lucideIcon, { width: 18, height: 18, "aria-hidden": "true", "stroke-width": 1.8 }).outerHTML;
   const paths = {
     moon: "<path d='M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z'/>",
     sun: "<circle cx='12' cy='12' r='4'/><path d='M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'/>",
@@ -488,18 +491,18 @@ function authModal(message = "") {
       <section class="auth-shell" role="dialog" aria-modal="true" aria-label="Authentication">
         <aside class="auth-left">
           <div class="brand brand-on-dark"><img class="brand-logo full" src="/talme-logo.png" alt="Talme Technologies Pvt Ltd"></div>
-          <h2>Secure identity for hiring and workforce operations.</h2>
-          <p>Authenticate candidates, employers, recruiters, employees, HR managers, company admins, platform admins, and super admins through one role-aware system.</p>
-          <div class="mini-list">
-            <div>${icon("shield")} Permission middleware on every API</div>
-            <div>${icon("key")} JWT, refresh tokens, CSRF protection</div>
-            <div>${icon("users")} Device history, login activity, audit logs</div>
+          <div class="auth-left-copy">
+            <h2>Your workspace.<br>One secure login.</h2>
+            <p>Access your TALME account to manage hiring and HR.</p>
           </div>
-          <img src="/illustration.svg" alt="Authentication illustration">
+          <div class="auth-left-badge">${icon("shield")} Secure account access</div>
         </aside>
         <section class="auth-right">
           <div class="modal-top">
-            <h2>${authTitle()}</h2>
+            <div>
+              <h2>${authTitle()}</h2>
+              ${state.authMode === "login" ? '<p>Sign in to your TALME account.</p>' : ""}
+            </div>
             <button class="btn icon" title="Close" data-close>${icon("x")}</button>
           </div>
           ${["login", "register"].includes(state.authMode) ? `
@@ -539,8 +542,7 @@ function loginForm(message) {
       <input type="hidden" name="role" value="${state.selectedRole}">
       <div class="field">
         <label>Email</label>
-        <input name="email" type="email" placeholder="Enter your registered email" autocomplete="email" required>
-        <small class="field-hint">Enter your registered email address.</small>
+        <input name="email" type="email" placeholder="Enter your email" autocomplete="email" required>
       </div>
       <div class="field">
         <label>Password</label>
@@ -550,12 +552,16 @@ function loginForm(message) {
         </div>
       </div>
       <div class="form-row">
-        <label class="check"><input name="rememberMe" type="checkbox"> Remember Me</label>
-        <button type="button" class="link-button" data-forgot>Forgot Password</button>
+        <label class="check"><input name="rememberMe" type="checkbox"> Remember me</label>
+        <button type="button" class="link-button" data-forgot>Forgot password?</button>
       </div>
-      <button class="btn primary" type="submit">${icon("lock")}Login using Email + Password</button>
+      <button class="btn primary" type="submit">Sign in ${icon("arrow")}</button>
       <p class="notice ${message ? "ok" : ""}" data-notice>${message}</p>
-      <button class="link-button" type="button" data-switch-register>Need registration?</button>
+      <div class="auth-register-row">
+        <span>New to TALME?</span>
+        <button class="link-button" type="button" data-switch-register>Register</button>
+      </div>
+      <div class="auth-info">${icon("Info")} New accounts require admin approval before login.</div>
     </form>
   `;
 }
