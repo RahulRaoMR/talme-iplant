@@ -1,3 +1,1 @@
-const { requestHandler } = require("../src/server");
-
-module.exports = requestHandler;
+module.exports = require("./index");
