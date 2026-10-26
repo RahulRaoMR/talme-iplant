@@ -1,4 +1,5 @@
 const { parseAdvancedSearch, matchesAdvancedSearch, advancedSearchSql } = require("./advanced-candidate-search");
+const { skillPattern, matchesSkill } = require("./skill-matching");
 
 function values(value) {
   return String(value || "").split(",").map(item => item.trim()).filter(Boolean).slice(0, 30);
@@ -41,7 +42,7 @@ function matchesEmployeeFilters(employee, filters) {
   if (filters.restrictIds && !filters.ids.includes(employeeId)) return false;
   if (filters.excludeIds.includes(employeeId)) return false;
   if (filters.locations.length && !filters.locations.some(value => contains(employee.location, value))) return false;
-  if (filters.skills.length && !filters.skills.some(value => contains(employee.keywords, value))) return false;
+  if (filters.skills.length && !filters.skills.some(value => matchesSkill([employee.keywords, ...(employee.skills || [])].filter(Boolean).join(", "), value))) return false;
   if (filters.company && !contains(employee.current_company || employee.currentCompany, filters.company)) return false;
   if (filters.designation && !contains(employee.current_designation || employee.designation, filters.designation)) return false;
   if (filters.experiences.length) {
@@ -63,8 +64,11 @@ function employeeFilterSql(filters, params) {
     params.push(value);
     return `$${params.length}`;
   };
-  for (const [column, selected] of [["e.location", filters.locations], ["e.keywords", filters.skills]]) {
+  for (const [column, selected] of [["e.location", filters.locations]]) {
     if (selected.length) where.push(`(${selected.map(value => `POSITION(LOWER(${parameter(value)}) IN LOWER(COALESCE(${column}, ''))) > 0`).join(" OR ")})`);
+  }
+  if (filters.skills.length) {
+    where.push(`(${filters.skills.map(value => `concat_ws(' ', e.keywords, array_to_string(skill_set.skills, ',')) ~* ${parameter(skillPattern(value))}`).join(" OR ")})`);
   }
   for (const [column, value] of [["e.current_company", filters.company], ["COALESCE(e.current_designation, e.designation)", filters.designation]]) {
     if (value) where.push(`POSITION(LOWER(${parameter(value)}) IN LOWER(COALESCE(${column}, ''))) > 0`);

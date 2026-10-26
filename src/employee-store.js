@@ -1,6 +1,7 @@
 const { Pool } = require("pg");
 const { loadLocalEnv } = require("./load-env");
 const { employeeFilters, employeeFilterSql, employeeOrderSql } = require("./employee-search");
+const { employeeProfileDetails } = require("./employee-profile-details");
 
 loadLocalEnv();
 
@@ -91,6 +92,7 @@ function rowToEmployee(row) {
     experience: row.experience == null ? null : Number(row.experience),
     current_company: row.current_company,
     current_designation: row.current_designation,
+    profile_details: employeeProfileDetails(row.source_payload),
     cv_file_name: row.cv_file_name,
     cv_stored_name: row.cv_stored_name,
     resume_s3_key: row.resume_s3_key,
@@ -116,7 +118,7 @@ const employeeSelect = `
   local_role_company_id, employee_code, name, email, phone, status,
   email_verified, phone_verified, designation, department, location, keywords,
   experience, current_company, current_designation, cv_file_name, cv_stored_name,
-  resume_s3_key, source_created_at, source_updated_at, created_at, updated_at
+  resume_s3_key, source_created_at, source_updated_at, source_payload, created_at, updated_at
 `;
 
 const employeeSearchSelect = `
@@ -125,7 +127,7 @@ const employeeSearchSelect = `
   e.local_role_company_id, e.employee_code, e.name, e.email, e.phone, e.status,
   e.email_verified, e.phone_verified, e.designation, e.department, e.location, e.keywords,
   e.experience, e.current_company, e.current_designation, e.cv_file_name, e.cv_stored_name,
-  e.resume_s3_key, e.source_created_at, e.source_updated_at, e.created_at, e.updated_at,
+  e.resume_s3_key, e.source_created_at, e.source_updated_at, e.source_payload, e.created_at, e.updated_at,
   latest_resume.id AS resume_id,
   latest_resume.file_name AS resume_file_name,
   latest_resume.file_path AS resume_file_path,
@@ -429,7 +431,7 @@ async function matchingNonImportedRecord(client, email, phone, employeeCode = nu
 
 async function matchingUploadRecord(client, email, phone, employeeCode = null, recordKey = null) {
   const result = await client.query(`
-    SELECT record_key, source_id, employee_code
+    SELECT record_key, source_id, employee_code, source_payload
     FROM hr_employee_records
     WHERE archived_at IS NULL
       AND (
@@ -858,7 +860,7 @@ async function saveManualEmployee({ record, body, cv }) {
       cvFileName: cv.cvFileName,
       cvStoredName: cv.cvStoredName,
       sourceUpdatedAt: new Date().toISOString(),
-      sourcePayload: { body }
+      sourcePayload: { ...existing?.source_payload, body }
     });
     const resumeId = await upsertLatestResume(client, saved.recordId, cv) || await latestResumeId(client, saved.recordId);
     await replaceEmployeeSkills(client, saved.recordId, resumeId, record.keywords);
@@ -913,6 +915,7 @@ async function updateEmployee(identifier, data, cv) {
           current_designation = $12,
           cv_file_name = COALESCE($13, cv_file_name),
           cv_stored_name = COALESCE($14, cv_stored_name),
+          source_payload = COALESCE(source_payload, '{}'::jsonb) || $15::jsonb,
           source_updated_at = NOW(),
           updated_at = NOW()
       WHERE record_key = $1
@@ -931,7 +934,8 @@ async function updateEmployee(identifier, data, cv) {
       normalizeText(data.currentCompany),
       normalizeText(data.currentDesignation) || normalizeText(data.designation) || "Employee",
       cv.cvFileName || null,
-      cv.cvStoredName || null
+      cv.cvStoredName || null,
+      JSON.stringify({ profile_details: { ...row.source_payload?.profile_details, ...employeeProfileDetails(row.source_payload), ...data.profileDetails } })
     ]);
     const updatedRow = result.rows[0];
     const resumeId = await upsertLatestResume(client, updatedRow.id, cv) || await latestResumeId(client, updatedRow.id);

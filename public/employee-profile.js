@@ -15,6 +15,10 @@ function employeeProfileSection(title, symbol, content, field = "", extraClass =
   return `<section class="employee-info-panel ${extraClass}"><header><h2>${icon(symbol)}${title}</h2>${field ? `<button type="button" class="employee-inline-edit" data-employee-edit data-employee-edit-focus="${field}" title="Edit ${title.toLowerCase()}">${icon("Pencil")}Edit</button>` : ""}</header>${content}</section>`;
 }
 
+function employeeProfileCtc(value) {
+  return value == null || value === "" ? null : `${value} LPA`;
+}
+
 function employeeProfileModel(employee) {
   const first = (...values) => values.find(value => value != null && value !== "");
   const details = employee.profile_details || {};
@@ -30,6 +34,8 @@ function employeeProfileModel(employee) {
     address: first(employee.address, details.address, employee.location),
     employmentType: first(employee.employment_type, details.employment_type), joiningDate: first(employee.joining_date, details.joining_date),
     noticePeriod: first(employee.notice_period, details.notice_period), reportingManager: first(employee.reporting_manager, details.reporting_manager),
+    currentCtc: employeeProfileCtc(first(details.current_ctc, employee.current_ctc)),
+    expectedCtc: employeeProfileCtc(first(details.expected_ctc, employee.expected_ctc)),
     bloodGroup: first(employee.blood_group, details.blood_group), maritalStatus: first(employee.marital_status, details.marital_status),
     emergencyContact: first(employee.emergency_contact, details.emergency_contact), linkedin: first(employee.linkedin, details.linkedin), website: first(employee.website, details.website)
   };
@@ -76,7 +82,7 @@ function employeeProfileOverview(employee, view) {
   ]), "name", "employee-personal");
   const employment = employeeProfileSection("Employment Information", "BriefcaseBusiness", employeeProfileRows([
     ["Current role", view.role], ["Department", view.department], ["Employment type", view.employmentType],
-    ["Joining date", view.joiningDate], ["Experience", view.experience], ["Notice period", view.noticePeriod], ["Reporting manager", view.reportingManager], ["Work location", view.location]
+    ["Joining date", view.joiningDate], ["Experience", view.experience], ["Current CTC", view.currentCtc], ["Expected CTC", view.expectedCtc], ["Notice period", view.noticePeriod], ["Reporting manager", view.reportingManager], ["Work location", view.location]
   ]), "department", "employee-employment");
   const skills = `<div class="employee-skill-list">${view.skills.length ? view.skills.map(skill => `<span>${escapeHtml(skill)}</span>`).join("") : '<span class="missing">Skills not added yet</span>'}</div>${view.skills.length ? "" : '<button type="button" class="employee-profile-button primary employee-add-skills" data-employee-edit data-employee-edit-focus="keywords">' + icon("Plus") + 'Add skills</button>'}`;
   return `<div class="employee-profile-grid">${personal}${employment}<aside class="employee-profile-sidebar">${employeeProfileSection("Attached CV", "FileText", employeeProfileCvCard(employee))}${employeeProfileSection("Update History", "History", `<button type="button" class="employee-history-all" data-employee-tab="activity">View all</button>${employeeProfileTimeline(employee)}`)}</aside>
@@ -95,25 +101,45 @@ function renderEmployeeProfileWorkspace(root, employee, options = {}) {
   const tabs = [["overview", "UserRound", "Profile Overview"], ["work", "BriefcaseBusiness", "Work Details"], ["skills", "ChartNoAxesColumnIncreasing", "Skills"], ["documents", "Files", "Documents"], ["activity", "History", "Activity"]];
   const tab = tabs.some(([key]) => key === requestedTab) ? requestedTab : "overview";
   let content = "";
-  if (editing) content = `<section class="employee-profile-editor">${employeeEditForm(employee)}</section>`;
+  if (editing && tab !== "activity") content = `<section class="employee-profile-editor">${employeeEditForm(employee, tab)}</section>`;
   else if (tab === "overview") content = employeeProfileOverview(employee, view);
-  else if (tab === "work") content = `<div class="employee-work-detail-grid">${employeeProfileSection("Employment Information", "BriefcaseBusiness", employeeProfileRows([["Current role", view.role], ["Company", view.company], ["Department", view.department], ["Work location", view.location], ["Employment type", view.employmentType], ["Joining date", view.joiningDate], ["Notice period", view.noticePeriod], ["Reporting manager", view.reportingManager]]), "currentDesignation")}${employeeProfileSection("Work Summary", "BriefcaseBusiness", employeeProfileWorkSummary(view), "experience")}</div>`;
+  else if (tab === "work") content = `<div class="employee-work-detail-grid">${employeeProfileSection("Employment Information", "BriefcaseBusiness", employeeProfileRows([["Current role", view.role], ["Company", view.company], ["Department", view.department], ["Work location", view.location], ["Employment type", view.employmentType], ["Joining date", view.joiningDate], ["Experience", view.experience], ["Current CTC", view.currentCtc], ["Expected CTC", view.expectedCtc], ["Notice period", view.noticePeriod], ["Reporting manager", view.reportingManager]]), "currentDesignation")}${employeeProfileSection("Work Summary", "BriefcaseBusiness", employeeProfileWorkSummary(view), "experience")}</div>`;
   else if (tab === "skills") content = employeeProfileSection("Key Skills", "Star", `<div class="employee-skill-list">${view.skills.length ? view.skills.map(skill => `<span>${escapeHtml(skill)}</span>`).join("") : '<span class="missing">Skills not added yet</span>'}</div>`, "keywords");
   else if (tab === "documents") content = `<div class="employee-documents-layout">${employeeProfileSection("Attached CV", "FileText", employeeProfileCvCard(employee))}</div>`;
   else if (tab === "activity") content = `<div class="employee-work-detail-grid">${employeeProfileSection("Update History", "History", employeeProfileTimeline(employee))}${employeeProfileSection("Record Details", "Database", employeeProfileRows([["Source", employee.source], ["Source row", employee.rowNumber], ["Employee code", view.code], ["Last update", employeeAuditLine(employee) || null]]))}</div>`;
   const status = view.status === "unknown" ? "Status not recorded" : view.status.charAt(0).toUpperCase() + view.status.slice(1);
   root.innerHTML = `<main class="employee-profile-workspace">
     <header class="employee-profile-toolbar"><nav aria-label="Breadcrumb"><button type="button" data-back-hr>Employees</button>${icon("ChevronRight")}<span>Employee Profile</span></nav>
-      <div class="employee-profile-actions"><button type="button" class="employee-profile-button primary" data-employee-edit>${icon(editing ? "X" : "Pencil")}${editing ? "Cancel editing" : "Edit profile"}</button><button type="button" class="employee-profile-button" data-employee-profile-call ${view.phone ? "" : "disabled"}>${icon("Phone")}Call</button><button type="button" class="employee-profile-button" data-employee-profile-email ${view.email ? "" : "disabled"}>${icon("Mail")}Email</button>
+      <div class="employee-profile-actions">${editing ? `<button type="submit" form="employee-profile-edit-form" class="employee-profile-button primary">${icon("Check")}Save changes</button>` : ""}<button type="button" class="employee-profile-button ${editing ? "" : "primary"}" data-employee-edit>${icon(editing ? "X" : "Pencil")}${editing ? "Cancel editing" : "Edit profile"}</button><button type="button" class="employee-profile-button" data-employee-profile-call ${view.phone ? "" : "disabled"}>${icon("Phone")}Call</button><button type="button" class="employee-profile-button" data-employee-profile-email ${view.email ? "" : "disabled"}>${icon("Mail")}Email</button>
         <details class="employee-profile-more"><summary class="employee-profile-button">${icon("Ellipsis")}More</summary><div><button type="button" data-profile-copy>${icon("Link")}Copy profile link</button><button type="button" data-employee-edit data-employee-edit-focus="cv">${icon("Upload")}Upload CV</button><button type="button" data-theme>${icon(state.theme === "dark" ? "Sun" : "Moon")}Toggle theme</button><button type="button" data-logout>${icon("LogOut")}Logout</button></div></details>
       </div></header>
     <section class="employee-profile-identity" aria-label="Employee summary"><div class="employee-profile-avatar">${escapeHtml(profileInitials(view.name))}</div><div class="employee-profile-person"><div class="employee-profile-name"><h1>${escapeHtml(view.name)}</h1><span class="employee-profile-status ${view.status === "active" ? "active" : ""}">${icon(view.status === "active" ? "CircleCheck" : "CircleHelp")}${escapeHtml(status)}</span></div><p>${escapeHtml(view.role)}</p><div class="employee-profile-secondary"><span>${icon("BriefcaseBusiness")}${escapeHtml(view.department || "Department not added")}</span><span>${icon("Badge")}${escapeHtml(view.code || "Employee code not added")}</span></div><div class="employee-profile-contact-meta"><span>${icon("Phone")}${escapeHtml(view.phone || "Phone not added")}</span><span>${icon("Mail")}${escapeHtml(view.email || "Email not added")}</span><span>${icon("MapPin")}${escapeHtml(view.location || "Location not added")}</span></div></div>
       <div class="employee-profile-summary">${[["CalendarDays", view.experience, "Experience", "blue"], ["UsersRound", view.role, "Role", "amber"], ["Building2", view.company || "Not added", "Company", "violet"]].map(([symbol, value, label, color]) => `<div><span class="employee-fact-icon ${color}">${icon(symbol)}</span><span><strong>${escapeHtml(value)}</strong><small>${label}</small></span></div>`).join("")}</div>
     </section>
     ${options.status ? `<p class="employee-profile-notice" role="status">${escapeHtml(options.status)}</p>` : ""}<p class="employee-profile-copy-status" data-profile-copy-status role="status" hidden></p>
-    <nav class="employee-profile-tabs" role="tablist" aria-label="Employee profile sections">${tabs.map(([key, symbol, label]) => `<button id="employee-tab-${key}" type="button" role="tab" aria-selected="${tab === key}" aria-controls="employee-profile-panel" class="${tab === key ? "active" : ""}" data-employee-tab="${key}" tabindex="${tab === key ? 0 : -1}" ${editing ? "disabled" : ""}>${icon(symbol)}${label}</button>`).join("")}</nav>
+    <nav class="employee-profile-tabs" role="tablist" aria-label="Employee profile sections">${tabs.map(([key, symbol, label]) => `<button id="employee-tab-${key}" type="button" role="tab" aria-selected="${tab === key}" aria-controls="employee-profile-panel" class="${tab === key ? "active" : ""}" data-employee-tab="${key}" tabindex="${tab === key ? 0 : -1}">${icon(symbol)}${label}</button>`).join("")}</nav>
     <div id="employee-profile-panel" class="employee-profile-content" role="tabpanel" aria-labelledby="employee-tab-${tab}">${content}</div>
+    ${editing && tab === "activity" ? `<section class="employee-profile-editor">${employeeEditForm(employee, tab)}</section>` : ""}
   </main>`;
+  const form = root.querySelector("[data-employee-edit-form]");
+  if (form) {
+    const sections = {
+      work: ["designation", "department", "location", "experience", "currentCompany", "currentDesignation", "employmentType", "joiningDate", "noticePeriod", "reportingManager", "currentCtc", "expectedCtc"],
+      skills: ["keywords"], documents: ["cv"]
+    };
+    form.querySelectorAll(".field").forEach(field => {
+      field.hidden = tab !== "overview" && !(sections[tab] || []).includes(field.querySelector("[name]")?.name);
+    });
+    if (options.draft) for (const field of form.elements) {
+      if (!field.name || !options.draft.has(field.name)) continue;
+      if (field.type === "file") {
+        const files = options.draft.getAll(field.name).filter(file => file instanceof File && file.name);
+        const transfer = new DataTransfer();
+        files.forEach(file => transfer.items.add(file));
+        field.files = transfer.files;
+      } else field.value = options.draft.get(field.name);
+    }
+  }
   bindRoleDashboard("hr");
   root.querySelector("[data-back-hr]").addEventListener("click", () => navigate("/hr/dashboard"));
   bindEmployeeProfileActions(employee, editing, tab);

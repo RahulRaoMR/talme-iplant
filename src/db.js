@@ -251,7 +251,8 @@ function migrate() {
     ["current_company", "TEXT"],
     ["current_designation", "TEXT"],
     ["cv_file_name", "TEXT"],
-    ["cv_stored_name", "TEXT"]
+    ["cv_stored_name", "TEXT"],
+    ["profile_details", "TEXT"]
   ]) {
     if (!employeeColumns.includes(name)) {
       db.exec(`ALTER TABLE employee_accounts ADD COLUMN ${name} ${type}`);

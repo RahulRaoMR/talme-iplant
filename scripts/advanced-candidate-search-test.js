@@ -36,6 +36,15 @@ assert(match({ noticePeriod: 30, cv: "attached", activeIn: 7 }));
 assert(!match({ noticePeriod: 15 }));
 assert(!matchesAdvancedSearch({}, parseAdvancedSearch({ activeIn: 7 })));
 assert.equal(candidateSearchDetails(employee).salary, 8);
+const edited = { ...employee, profile_details: { current_ctc: "6.5", employment_type: "Contract", notice_period: "15 days" } };
+assert(matchesAdvancedSearch(edited, parseAdvancedSearch({ minSalary: 6, maxSalary: 7, employmentType: "Contract", noticePeriod: 15 })));
+assert(!matchesAdvancedSearch(edited, parseAdvancedSearch({ minSalary: 8 })));
+assert.equal(candidateSearchDetails({ ...edited, profile_details: { current_ctc: null, notice_period: "Immediate" } }).salary, null);
+assert.equal(candidateSearchDetails({ ...edited, profile_details: { notice_period: "Immediate" } }).noticePeriod, 0);
+assert.equal(candidateSearchDetails({ profile_details: JSON.stringify({ current_ctc: "0", notice_period: "0 days" }) }).salary, 0);
+assert.equal(candidateSearchDetails({ profile_details: JSON.stringify({ notice_period: "0 days" }) }).noticePeriod, 0);
+assert(!matchesAdvancedSearch({ keywords: "JavaScript, MySQL" }, parseAdvancedSearch({ skills: "Java" })));
+assert(!matchesAdvancedSearch({ keywords: "JavaScript, MySQL" }, parseAdvancedSearch({ skills: "SQL" })));
 for (const criteria of [{ minExperience: 5, maxExperience: 2 }, { minSalary: -1 }, { keywords: "Java AND (", booleanMode: true }, { keywords: "name:Java", booleanMode: true }]) assert.throws(() => parseAdvancedSearch(criteria), error => error.statusCode === 400);
 assert.throws(() => parseAdvancedSearch("broken JSON"), error => error.statusCode === 400);
 

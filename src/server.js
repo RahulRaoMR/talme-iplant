@@ -58,6 +58,7 @@ const {
 } = require("./auth-store");
 const { requireEmailConfig, sendPasswordResetOtpEmail } = require("./email");
 const employeeStore = require("./employee-store");
+const { WORK_DETAIL_FIELDS, employeeProfileDetails } = require("./employee-profile-details");
 const { employeeFilters, matchesEmployeeFilters, sortEmployees } = require("./employee-search");
 const { adminActivity, adminTodayStats, adminDeviceStats } = require("./admin-monitor");
 const { recordIpLocation } = require("./ip-location");
@@ -1253,18 +1254,18 @@ async function searchHrEmployees(req, res) {
   }
 
   const localRows = db.prepare(`
-    SELECT u.id, ea.employee_code, u.name,
+    SELECT u.id, ea.employee_code, u.name, u.updated_at AS updatedAt,
            CASE WHEN lower(u.email) LIKE 'local-import-%@talme.local' THEN '' ELSE u.email END AS email,
            u.phone, ea.designation, ea.department,
            ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
-           ea.cv_file_name, ea.cv_stored_name
+           ea.cv_file_name, ea.cv_stored_name, ea.profile_details
     FROM employee_accounts ea
     JOIN users u ON u.id = ea.user_id
     JOIN user_roles ur ON ur.user_id = u.id
     JOIN roles r ON r.id = ur.role_id
     WHERE r.slug = 'employee'
     ORDER BY u.name
-  `).all();
+  `).all().map(employee => ({ ...employee, profile_details: employeeProfileDetails(employee) }));
   const importedPayload = readImportedEmployeesPayload();
   const importedItems = (Array.isArray(importedPayload.items) ? importedPayload.items : []).map(item => ({
     ...item,
@@ -1615,7 +1616,7 @@ function normalizeCandidateRecord(raw) {
     if (!record[column]) reasons.push(`${column} is required`);
   }
   if (record.email && !validEmail(record.email)) reasons.push("Invalid email format");
-  if (record.experience != null && (Number.isNaN(record.experience) || record.experience < 0)) {
+  if (record.experience != null && (!Number.isFinite(record.experience) || record.experience < 0)) {
     reasons.push("experience must be a positive number");
   }
   if (reasons.length) {
@@ -1801,13 +1802,27 @@ function normalizeEmployeeUpdate(raw) {
     keywords: trimCell(raw.keywords),
     experience: trimCell(raw.experience) === "" ? null : Number(trimCell(raw.experience)),
     currentCompany: trimCell(raw.currentCompany || raw.current_company) || null,
-    currentDesignation: trimCell(raw.currentDesignation || raw.current_designation) || null
+    currentDesignation: trimCell(raw.currentDesignation || raw.current_designation) || null,
+    profileDetails: Object.fromEntries(Object.entries(WORK_DETAIL_FIELDS)
+      .filter(([alias, key]) => Object.hasOwn(raw, alias) || Object.hasOwn(raw, key))
+      .map(([alias, key]) => [key, trimCell(raw[alias] ?? raw[key]) || null]))
   };
   const reasons = [];
   if (!record.name) reasons.push("name is required");
   if (record.email && !validEmail(record.email)) reasons.push("Invalid email format");
-  if (record.experience != null && (Number.isNaN(record.experience) || record.experience < 0)) {
+  if (record.experience != null && (!Number.isFinite(record.experience) || record.experience < 0)) {
     reasons.push("experience must be a positive number");
+  }
+  const joiningDate = record.profileDetails.joining_date;
+  if (joiningDate && (!/^\d{4}-\d{2}-\d{2}$/.test(joiningDate)
+    || Number.isNaN(Date.parse(joiningDate)) || new Date(joiningDate).toISOString().slice(0, 10) !== joiningDate)) {
+    reasons.push("joining date must be a valid date (YYYY-MM-DD)");
+  }
+  for (const [key, label] of [["current_ctc", "Current CTC"], ["expected_ctc", "Expected CTC"]]) {
+    const amount = record.profileDetails[key];
+    if (amount != null && (!Number.isFinite(Number(amount)) || Number(amount) < 0)) {
+      reasons.push(`${label} must be a non-negative number in LPA`);
+    } else if (amount != null) record.profileDetails[key] = String(Number(amount));
   }
   if (reasons.length) {
     const error = new Error(reasons.join(", "));
@@ -1898,6 +1913,7 @@ function employeeResponse(record) {
     experience: record.experience,
     current_company: record.current_company,
     current_designation: record.current_designation,
+    profile_details: employeeProfileDetails(record),
     cv_file_name: record.cv_file_name,
     cv_stored_name: record.cv_stored_name,
     latest_resume: record.latest_resume || null,
@@ -1940,7 +1956,7 @@ async function hrEmployeeDetails(req, res, employeeId) {
       SELECT u.id, u.name, u.email, u.phone, u.status, u.created_at AS createdAt,
              u.updated_at AS updatedAt, ea.employee_code, ea.designation, ea.department,
              ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
-             ea.cv_file_name, ea.cv_stored_name
+             ea.cv_file_name, ea.cv_stored_name, ea.profile_details
       FROM employee_accounts ea JOIN users u ON u.id = ea.user_id
       WHERE u.id = ? OR ea.employee_code = ? OR lower(u.email) = lower(?) OR u.phone = ?
       LIMIT 1
@@ -2012,6 +2028,7 @@ async function updateHrEmployee(req, res, employeeId) {
       experience: data.experience,
       current_company: data.currentCompany,
       current_designation: data.currentDesignation || data.designation || "Employee",
+      profile_details: { ...employeeProfileDetails(existing), ...data.profileDetails },
       cv_file_name: cv.cvFileName || existing.cv_file_name || null,
       cv_stored_name: cv.cvStoredName || existing.cv_stored_name || null,
       updatedAt: now()
@@ -2031,7 +2048,7 @@ async function updateHrEmployee(req, res, employeeId) {
   const employee = db.prepare(`
     SELECT u.id, ea.id AS employee_account_id, ea.company_id, ea.employee_code, u.name, u.email, u.phone,
            ea.designation, ea.department, ea.location, ea.keywords, ea.experience, ea.current_company,
-           ea.current_designation, ea.cv_file_name, ea.cv_stored_name
+           ea.current_designation, ea.cv_file_name, ea.cv_stored_name, ea.profile_details
     FROM employee_accounts ea
     JOIN users u ON u.id = ea.user_id
     WHERE u.id = ? OR ea.employee_code = ?
@@ -2063,7 +2080,7 @@ async function updateHrEmployee(req, res, employeeId) {
   db.prepare(`
     UPDATE employee_accounts
     SET employee_code = ?, designation = ?, department = ?, location = ?, keywords = ?, experience = ?,
-        current_company = ?, current_designation = ?, cv_file_name = ?, cv_stored_name = ?
+        current_company = ?, current_designation = ?, cv_file_name = ?, cv_stored_name = ?, profile_details = ?
     WHERE user_id = ?
   `).run(
     data.employeeCode || employee.employee_code,
@@ -2076,13 +2093,14 @@ async function updateHrEmployee(req, res, employeeId) {
     data.currentDesignation || data.designation || "Employee",
     cv.cvFileName || employee.cv_file_name || null,
     cv.cvStoredName || employee.cv_stored_name || null,
+    JSON.stringify({ ...employeeProfileDetails(employee), ...data.profileDetails }),
     employee.id
   );
 
   let updated = db.prepare(`
     SELECT u.id, ea.employee_code, u.name, u.email, u.phone, ea.designation, ea.department,
            ea.location, ea.keywords, ea.experience, ea.current_company, ea.current_designation,
-           ea.cv_file_name, ea.cv_stored_name
+           ea.cv_file_name, ea.cv_stored_name, ea.profile_details
     FROM employee_accounts ea
     JOIN users u ON u.id = ea.user_id
     WHERE u.id = ?

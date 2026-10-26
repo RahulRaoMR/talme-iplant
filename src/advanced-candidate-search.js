@@ -1,4 +1,5 @@
 const lucene = require("lucene");
+const { skillPattern, matchesSkill } = require("./skill-matching");
 
 function searchError(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
@@ -69,16 +70,24 @@ function parseAdvancedSearch(value) {
 function candidateSearchDetails(employee) {
   const source = employee.source_payload || employee.sourcePayload || {};
   const details = { ...source, ...(source.data || {}), ...employee };
+  let profile = employee.profile_details ?? source.profile_details ?? {};
+  if (typeof profile === "string") {
+    try { profile = JSON.parse(profile); } catch { profile = {}; }
+  }
+  const edited = (key, fallback) => Object.hasOwn(profile || {}, key) ? profile[key] : fallback;
+  const notice = edited("notice_period", details.notice_period_days ?? details.noticePeriodDays ?? details.notice_period);
+  const noticeText = String(notice ?? "").trim().toLowerCase();
+  const noticeDays = number(notice) ?? (/^\d+(?:\.\d+)?\s*days?$/.test(noticeText) ? Number.parseFloat(noticeText) : ["immediate", "immediately"].includes(noticeText) ? 0 : null);
   return {
     preferredLocations: details.preferred_locations ?? details.preferredLocations ?? "",
     willingToRelocate: details.willing_to_relocate ?? details.willingToRelocate,
-    salary: number(details.current_ctc_lpa ?? details.salary_lpa ?? details.current_ctc),
-    employmentType: details.employment_type ?? details.employmentType ?? "",
+    salary: number(edited("current_ctc", details.current_ctc_lpa ?? details.salary_lpa ?? details.current_ctc)),
+    employmentType: edited("employment_type", details.employment_type ?? details.employmentType) ?? "",
     degree: details.degree ?? details.education?.degree ?? (typeof details.education === "string" ? details.education : ""),
     institution: details.institution ?? details.education?.institution ?? "",
     graduationYear: number(details.graduation_year ?? details.graduationYear ?? details.education?.graduationYear),
     gender: details.gender ?? "", disability: details.disability_status ?? details.disabilityStatus,
-    age: number(details.age), noticePeriod: number(details.notice_period_days ?? details.noticePeriodDays),
+    age: number(details.age), noticePeriod: noticeDays,
     lastActiveAt: details.last_active_at ?? details.lastActiveAt ?? ""
   };
 }
@@ -106,7 +115,7 @@ function matchesAdvancedSearch(employee, filters, now = Date.now()) {
   if (filters.keywordTree && !booleanExpression(filters.keywordTree, term => contains(text, term), (a, b) => a && b, (a, b) => a || b, a => !a)) return false;
   if (filters.keywordTerms.length && !filters.keywordTerms.some(term => contains(text, term))) return false;
   if (!filters.mandatory.every(term => contains(text, term)) || filters.exclude.some(term => contains(text, term))) return false;
-  if (filters.skills.length && !filters.skills.every(term => contains(employee.keywords || (employee.skills || []).join(","), term))) return false;
+  if (filters.skills.length && !filters.skills.every(term => matchesSkill([employee.keywords, ...(employee.skills || [])].filter(Boolean).join(", "), term))) return false;
   const yes = value => ["yes", "true", "1"].includes(String(value).toLowerCase());
   const no = value => ["no", "false", "0"].includes(String(value).toLowerCase());
   if (filters.locations.length && !filters.locations.some(term => contains(employee.location, term) || (filters.includeRelocating && yes(details.willingToRelocate) && contains(details.preferredLocations, term)))) return false;
@@ -139,6 +148,7 @@ function advancedSearchSql(filters, params) {
   const where = [];
   const parameter = value => { params.push(value); return `$${params.length}`; };
   const metadata = (keys, fallback = "''") => `COALESCE(${keys.flatMap(key => [`e.source_payload #>> '{data,${key}}'`, `e.source_payload ->> '${key}'`]).map(expression => `NULLIF(${expression}, '')`).join(", ")}, ${fallback})`;
+  const edited = (key, fallback) => `(CASE WHEN e.source_payload -> 'profile_details' ? '${key}' THEN e.source_payload #>> '{profile_details,${key}}' ELSE ${fallback} END)`;
   const numeric = expression => `(CASE WHEN ${expression} ~ '^[0-9]+([.][0-9]+)?$' THEN (${expression})::numeric END)`;
   const preferred = metadata(["preferred_locations", "preferredLocations"]);
   const relocating = metadata(["willing_to_relocate", "willingToRelocate"], "NULL");
@@ -152,10 +162,10 @@ function advancedSearchSql(filters, params) {
   if (filters.keywordTerms.length) where.push(`(${filters.keywordTerms.map(term => contains(text, term)).join(" OR ")})`);
   filters.mandatory.forEach(term => where.push(contains(text, term)));
   filters.exclude.forEach(term => where.push(`NOT ${contains(text, term)}`));
-  filters.skills.forEach(term => where.push(contains("concat_ws(' ', e.keywords, array_to_string(skill_set.skills, ','))", term)));
+  filters.skills.forEach(term => where.push(`concat_ws(' ', e.keywords, array_to_string(skill_set.skills, ',')) ~* ${parameter(skillPattern(term))}`));
   if (filters.locations.length) where.push(`(${filters.locations.map(term => `(${contains("e.location", term)}${filters.includeRelocating ? ` OR (LOWER(${relocating}) IN ('true', 'yes', '1') AND ${contains(preferred, term)})` : ""})`).join(" OR ")})`);
   if (filters.preferredLocations.length) where.push(`(${filters.preferredLocations.map(term => contains(preferred, term)).join(" OR ")})`);
-  for (const [field, value] of [["e.current_company", filters.company], ["COALESCE(e.current_designation, e.designation)", filters.designation], ["e.department", filters.department], [metadata(["employment_type", "employmentType"]), filters.employmentType], [degree, filters.degree], [institution, filters.institution]]) {
+  for (const [field, value] of [["e.current_company", filters.company], ["COALESCE(e.current_designation, e.designation)", filters.designation], ["e.department", filters.department], [edited("employment_type", metadata(["employment_type", "employmentType"])), filters.employmentType], [degree, filters.degree], [institution, filters.institution]]) {
     if (value) where.push(contains(field, value));
   }
   if (filters.gender) where.push(`LOWER(${metadata(["gender"])}) = LOWER(${parameter(filters.gender)})`);
@@ -168,8 +178,10 @@ function advancedSearchSql(filters, params) {
     if (maximum !== null) clauses.push(`${field} <= ${parameter(maximum)}`);
     return clauses.join(" AND ");
   };
-  const salary = numeric(metadata(["current_ctc_lpa", "salary_lpa", "current_ctc"]));
-  for (const [field, min, max] of [["e.experience", filters.minExperience, filters.maxExperience], [salary, filters.minSalary, filters.maxSalary], [numeric(metadata(["age"])), filters.minAge, filters.maxAge], [numeric(metadata(["notice_period_days", "noticePeriodDays"])), null, filters.noticePeriod]]) {
+  const salary = numeric(edited("current_ctc", metadata(["current_ctc_lpa", "salary_lpa", "current_ctc"])));
+  const noticeText = `LOWER(BTRIM(${edited("notice_period", metadata(["notice_period_days", "noticePeriodDays", "notice_period"]))}))`;
+  const noticeDays = `(CASE WHEN ${noticeText} IN ('immediate', 'immediately') THEN 0 WHEN ${noticeText} ~ '^[0-9]+([.][0-9]+)?([[:space:]]*days?)?$' THEN regexp_replace(${noticeText}, '[[:space:]]*days?$', '')::numeric END)`;
+  for (const [field, min, max] of [["e.experience", filters.minExperience, filters.maxExperience], [salary, filters.minSalary, filters.maxSalary], [numeric(metadata(["age"])), filters.minAge, filters.maxAge], [noticeDays, null, filters.noticePeriod]]) {
     const clause = range(field, min, max);
     if (clause) where.push(`(${clause}${field === salary && filters.includeUnknownSalary ? ` OR ${salary} IS NULL` : ""})`);
   }

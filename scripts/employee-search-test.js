@@ -24,6 +24,12 @@ assert.deepEqual(matching({ ids: '["1","3"]' }), ["1", "3"]);
 assert.deepEqual(matching({ ids: "[]" }), []);
 assert.deepEqual(matching({ ids: "not JSON" }), []);
 assert.deepEqual(matching({ excludeIds: '["1","3"]' }), ["2", "4"]);
+assert.equal(matchesEmployeeFilters({ keywords: "JavaScript, MySQL" }, employeeFilters({ skills: "Java" })), false);
+assert.equal(matchesEmployeeFilters({ keywords: "JavaScript, MySQL" }, employeeFilters({ skills: "SQL" })), false);
+assert.equal(matchesEmployeeFilters({ skills: ["Java", "SQL"] }, employeeFilters({ skills: "Java" })), true);
+for (const skill of ["C++", "C#", "Node.js", ".NET", "Spring"]) {
+  assert(matchesEmployeeFilters({ keywords: "C++, C#, Node.js, .NET, Spring Boot" }, employeeFilters({ skills: skill })));
+}
 assert.deepEqual(sortEmployees([...employees], "experience").map(employee => employee.id), ["2", "1", "3", "4"]);
 assert.deepEqual(sortEmployees([...employees], "recent").map(employee => employee.id), ["2", "1", "3", "4"]);
 

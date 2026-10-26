@@ -2026,6 +2026,7 @@ function renderTalentRecords(items) {
     const skills = Array.isArray(employee.skills) && employee.skills.length ? employee.skills : employeeSkills(employee.keywords);
     const expanded = state.expandedEmployeeSkills.has(id);
     const shownSkills = expanded ? skills : skills.slice(0, 4);
+    const profile = employeeProfileModel(employee);
     const updated = employee.updatedAt || employee.updated_at || employee.last_edited_at;
     const date = updated && !Number.isNaN(new Date(updated).getTime()) ? new Date(updated).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "";
     return `<article class="talent-record">
@@ -2036,7 +2037,7 @@ function renderTalentRecords(items) {
         <div class="talent-record-meta"><span>${icon("BriefcaseBusiness")}${escapeHtml(formatExperience(employee.experience))}</span><span>${icon("MapPin")}${highlightSearch(employee.location || "Not provided", query)}</span></div>
         <div class="talent-record-contact">${icon("Mail")}<span>${highlightSearch(employee.email || employee.phone || "Contact not provided", query)}</span></div>
       </div>
-      <div class="talent-record-details"><div class="talent-record-facts"><div><small>Current CTC</small><strong>${escapeHtml(employee.current_ctc || "--")}</strong></div><div><small>Expected CTC</small><strong>${escapeHtml(employee.expected_ctc || "--")}</strong></div><div><small>Notice Period</small><strong>${escapeHtml(employee.notice_period || "--")}</strong></div></div>
+      <div class="talent-record-details"><div class="talent-record-facts"><div><small>Current CTC</small><strong>${escapeHtml(profile.currentCtc || "--")}</strong></div><div><small>Expected CTC</small><strong>${escapeHtml(profile.expectedCtc || "--")}</strong></div><div><small>Notice Period</small><strong>${escapeHtml(profile.noticePeriod ?? "--")}</strong></div></div>
         <div class="talent-skill-tags">${shownSkills.map(skill => `<span>${highlightSearch(skill, query)}</span>`).join("")}${skills.length > 4 ? `<button type="button" data-talent-skills="${escapeHtml(id)}" aria-label="${expanded ? "Show fewer" : "Show more"} skills">${expanded ? "Less" : `+${skills.length - 4}`}</button>` : ""}${!skills.length ? `<small>Skills not provided</small>` : ""}</div>
       </div>
       <div class="talent-record-actions"><div class="talent-record-updated"><small>${workflow.interviewAt ? `Interview ${escapeHtml(new Date(workflow.interviewAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }))}` : date ? `Updated ${date}` : "Employee record"}</small><details class="talent-record-menu"><summary class="talent-icon-button" title="Candidate actions" aria-label="Candidate actions">${icon("EllipsisVertical")}</summary><div class="talent-menu-content"><button type="button" data-employee-email="${escapeHtml(employee.email)}" ${!employee.email ? "disabled" : ""}>${icon("Mail")}Email candidate</button><button type="button" data-talent-reopen="${escapeHtml(id)}">${icon("RotateCcw")}Set active</button></div></details></div>
@@ -2427,15 +2428,16 @@ function renderHrEmployeeProfile(root, employee, options = {}) {
 }
 
 
-function employeeEditForm(employee) {
-  const value = field => escapeHtml(employee[field] || "");
+function employeeEditForm(employee, tab = "overview") {
+  const details = employee.profile_details || {};
+  const value = field => escapeHtml(employee[field] ?? details[field] ?? "");
   const currentCompany = employee.current_company || employee.currentCompany || "";
   const currentDesignation = employee.current_designation || employee.currentDesignation || employee.designation || "";
   const employeeCode = defaultEmployeeCode(employee);
   return `
-    <form class="employee-edit-form" data-employee-edit-form>
+    <form id="employee-profile-edit-form" class="employee-edit-form" data-employee-edit-form>
       <section class="profile-section">
-        <h2>Edit information</h2>
+        <h2>${({ work: "Edit work details", skills: "Edit skills", documents: "Edit documents", activity: "Unsaved profile changes" })[tab] || "Edit information"}</h2>
         <div class="candidate-add-grid employee-edit-grid">
           <label class="field">
             <span>Full name</span>
@@ -2464,11 +2466,11 @@ function employeeEditForm(employee) {
             <input name="department" value="${value("department")}">
           </label>
           <label class="field">
-            <span>Location</span>
+            <span>Work location</span>
             <input name="location" value="${value("location")}">
           </label>
           <label class="field">
-            <span>Experience</span>
+            <span>Experience (years)</span>
             <input name="experience" type="number" min="0" step="0.1" value="${escapeHtml(employee.experience ?? "")}">
           </label>
           <label class="field">
@@ -2476,8 +2478,34 @@ function employeeEditForm(employee) {
             <input name="currentCompany" value="${escapeHtml(currentCompany)}">
           </label>
           <label class="field">
-            <span>Current designation</span>
+            <span>Current role</span>
             <input name="currentDesignation" value="${escapeHtml(currentDesignation)}">
+          </label>
+          <label class="field">
+            <span>Employment type</span>
+            <input name="employmentType" maxlength="200" placeholder="e.g. Permanent, Contract, Internship" value="${value("employment_type")}">
+          </label>
+          <label class="field">
+            <span>Joining date</span>
+            <input name="joiningDate" type="date" value="${value("joining_date")}">
+          </label>
+          <label class="field">
+            <span>Notice period</span>
+            <input name="noticePeriod" maxlength="200" placeholder="e.g. 30 days or Immediate" value="${value("notice_period")}">
+          </label>
+          <label class="field">
+            <span>Reporting manager</span>
+            <input name="reportingManager" maxlength="200" value="${value("reporting_manager")}">
+          </label>
+          <label class="field">
+            <span>Current CTC (LPA)</span>
+            <input name="currentCtc" type="number" min="0" step="0.01" placeholder="e.g. 6.50" value="${value("current_ctc")}">
+            <small class="field-hint">Annual CTC in INR lakhs.</small>
+          </label>
+          <label class="field">
+            <span>Expected CTC (LPA)</span>
+            <input name="expectedCtc" type="number" min="0" step="0.01" placeholder="e.g. 9.00" value="${value("expected_ctc")}">
+            <small class="field-hint">Annual CTC in INR lakhs.</small>
           </label>
           <label class="field candidate-add-wide">
             <span>Key skills</span>
@@ -2497,7 +2525,7 @@ function employeeEditForm(employee) {
             <input value="${escapeHtml(employee.rowNumber || "")}" disabled>
           </label>
         </div>
-        <p class="notice" data-employee-edit-status></p>
+        <p class="notice" data-employee-edit-status role="status" aria-live="polite"></p>
         <div class="employee-edit-actions">
           <button class="btn" type="button" data-employee-edit-cancel>Cancel</button>
           <button class="btn primary" type="submit">${icon("shield")}Save changes</button>
@@ -2543,12 +2571,21 @@ function bindEmployeeProfileActions(employee, isEditing = false, activeTab = "pr
   }));
   document.querySelectorAll("[data-employee-edit]").forEach(button => button.addEventListener("click", () => {
     const field = button.dataset.employeeEditFocus;
-    renderHrEmployeeProfile(document.querySelector("#app"), employee, { edit: !isEditing, tab: activeTab });
+    const editTab = field === "cv" ? "documents" : field === "keywords" ? "skills" : activeTab;
+    const form = document.querySelector("[data-employee-edit-form]");
+    renderHrEmployeeProfile(document.querySelector("#app"), employee, {
+      edit: field ? true : !isEditing, tab: editTab,
+      draft: isEditing && field && form ? new FormData(form) : null
+    });
     if (field && !isEditing) document.querySelector(`[data-employee-edit-form] [name="${field}"]`)?.focus();
   }));
   document.querySelectorAll("[data-employee-tab]").forEach(button => {
     button.addEventListener("click", () => {
-      renderHrEmployeeProfile(document.querySelector("#app"), employee, { tab: button.dataset.employeeTab || "profile" });
+      const form = document.querySelector("[data-employee-edit-form]");
+      renderHrEmployeeProfile(document.querySelector("#app"), employee, {
+        tab: button.dataset.employeeTab || "overview", edit: isEditing,
+        draft: isEditing && form ? new FormData(form) : null
+      });
     });
   });
   document.querySelector("[data-employee-edit-cancel]")?.addEventListener("click", () => {
@@ -2560,18 +2597,22 @@ function bindEmployeeProfileActions(employee, isEditing = false, activeTab = "pr
     const status = document.querySelector("[data-employee-edit-status]");
     const submit = form.querySelector('button[type="submit"]');
     const employeeId = employeeRecordId(employee);
+    if (form.dataset.saving) return;
+    form.dataset.saving = "true";
     status.textContent = "Saving employee details...";
     status.className = "notice";
-    submit.disabled = true;
+    const controls = [...document.querySelectorAll('[data-employee-tab], [data-employee-edit], [data-employee-edit-cancel], button[form="employee-profile-edit-form"]'), submit];
+    controls.forEach(control => { control.disabled = true; });
     try {
       const payload = await apiUpload(`/api/hr/employees/${encodeURIComponent(employeeId)}`, new FormData(form), { method: "PUT" });
       const updatedEmployee = { ...employee, ...(payload.employee || {}) };
       updateHrEmployeeInState(employeeId, updatedEmployee);
-      renderHrEmployeeProfile(document.querySelector("#app"), updatedEmployee, { status: payload.message || "Employee updated successfully." });
+      renderHrEmployeeProfile(document.querySelector("#app"), updatedEmployee, { tab: activeTab, status: payload.message || "Employee updated successfully." });
     } catch (error) {
       status.textContent = error.message;
       status.className = "notice error";
-      submit.disabled = false;
+      delete form.dataset.saving;
+      controls.forEach(control => { control.disabled = false; });
     }
   });
 }
