@@ -14,6 +14,12 @@ assert.equal(getClientIp(request("::ffff:127.0.0.1", "1.1.1.1, 10.0.0.2"), "loop
 assert.equal(getClientIp(request("127.0.0.1", "spoofed, 1.1.1.1"), "loopback"), "1.1.1.1");
 assert.equal(getClientIp(request("127.0.0.1", "1.1.1.1, invalid"), "loopback"), "127.0.0.1");
 assert.equal(getClientIp(request("127.0.0.1", "1.1.1.1"), "invalid-network"), "127.0.0.1");
+const originalVercel = process.env.VERCEL;
+process.env.VERCEL = "1";
+assert.equal(getClientIp(request("127.0.0.1", "8.8.8.8")), "8.8.8.8");
+assert.equal(getClientIp({ headers: { "x-vercel-forwarded-for": "1.1.1.1", "x-forwarded-for": "8.8.8.8" } }), "1.1.1.1");
+assert.equal(getClientIp(request("127.0.0.1", "spoofed, 8.8.8.8")), "127.0.0.1");
+if (originalVercel === undefined) delete process.env.VERCEL; else process.env.VERCEL = originalVercel;
 const unexpectedLookup = () => { throw new Error("Non-public addresses must not reach the lookup provider"); };
 for (const ip of ["127.0.0.1", "::1", "10.0.0.1", "192.168.2.1", "172.16.0.1", "169.254.2.1", "100.64.0.1", "fc00::1", "fe80::1"]) assert.equal(resolveIpLocation(ip, unexpectedLookup).status, "local");
 for (const ip of ["192.0.2.1", "198.51.100.1", "203.0.113.1", "224.0.0.1"]) assert.equal(resolveIpLocation(ip, unexpectedLookup).status, "reserved");

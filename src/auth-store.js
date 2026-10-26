@@ -3,6 +3,7 @@ const { Pool } = require("pg");
 const { loadLocalEnv } = require("./load-env");
 const { isApprovedAccount, registrationAccessMessage } = require("./registration-policy");
 const { sessionTimeoutSeconds } = require("./config");
+const { recordLoginAttempt, persistentMonitoring, persistentDevices } = require("./auth-monitor");
 
 loadLocalEnv();
 const databaseUrl = process.env.DATABASE_URL;
@@ -147,27 +148,19 @@ async function updateAuthUserPassword(email, password, role = null) {
   return result.rows[0] || null;
 }
 
-async function createAuthSession({ sessionKey, email, role, refreshTokenHash, csrfToken, rememberMe, expiresAt, ipAddress, userAgent }) {
+async function createAuthSession({ sessionKey, email, role, refreshTokenHash, csrfToken, rememberMe, expiresAt, ipAddress, userAgent, location }) {
   await ensureAuthSchema();
   if (!pool) throw new Error("DATABASE_URL is required for production authentication");
   const normalizedRole = normalizeRole(role);
-  await pool.query(
-    `UPDATE auth_sessions
-     SET revoked_at = NOW()
-     WHERE LOWER(email) = LOWER($1)
-       AND ($2::text IS NULL OR role = $2)
-       AND revoked_at IS NULL`,
-    [normalizeEmail(email), normalizedRole || null]
-  );
   const result = await pool.query(
     `WITH approved AS (
        SELECT email, role FROM auth_users WHERE LOWER(email) = LOWER($2) AND role = $3
        AND is_active AND approval_status = 'APPROVED' AND deleted_at IS NULL FOR SHARE
      ) INSERT INTO auth_sessions
-       (session_key, email, role, refresh_token_hash, csrf_token, remember_me, expires_at, last_seen_at, ip_address, user_agent)
-     SELECT $1, email, role, $4, $5, $6, $7, NOW(), $8, $9 FROM approved
+       (session_key, email, role, refresh_token_hash, csrf_token, remember_me, expires_at, last_seen_at, ip_address, user_agent, location_json)
+     SELECT $1, email, role, $4, $5, $6, $7, NOW(), $8, $9, $10::jsonb FROM approved
      RETURNING id, session_key, email, role, csrf_token, remember_me, expires_at, last_seen_at, revoked_at`,
-    [sessionKey, normalizeEmail(email), normalizedRole || null, refreshTokenHash, csrfToken, Boolean(rememberMe), expiresAt, ipAddress || null, userAgent || null]
+    [sessionKey, normalizeEmail(email), normalizedRole || null, refreshTokenHash, csrfToken, Boolean(rememberMe), expiresAt, ipAddress || null, userAgent || null, location ? JSON.stringify(location) : null]
   );
   if (!result.rows[0]) throw Object.assign(new Error("Account approval is required to log in."), { statusCode: 403 });
   return result.rows[0];
@@ -267,37 +260,37 @@ async function touchAuthSession(sessionKey) {
   return result.rowCount;
 }
 
-async function revokeAuthSessionByKey(sessionKey) {
+async function revokeAuthSessionByKey(sessionKey, reason = "Session ended") {
   await ensureAuthSchema();
   if (!pool) return 0;
   const result = await pool.query(
-    `UPDATE auth_sessions SET revoked_at = NOW() WHERE session_key = $1 AND revoked_at IS NULL`,
-    [String(sessionKey || "")]
+    `UPDATE auth_sessions SET revoked_at = NOW(), logout_reason = $2 WHERE session_key = $1 AND revoked_at IS NULL`,
+    [String(sessionKey || ""), reason]
   );
   return result.rowCount;
 }
 
-async function revokeAuthSessionByRefreshHash(refreshTokenHash) {
+async function revokeAuthSessionByRefreshHash(refreshTokenHash, reason = "Session ended") {
   await ensureAuthSchema();
   if (!pool) return 0;
   const result = await pool.query(
-    `UPDATE auth_sessions SET revoked_at = NOW() WHERE refresh_token_hash = $1 AND revoked_at IS NULL`,
-    [String(refreshTokenHash || "")]
+    `UPDATE auth_sessions SET revoked_at = NOW(), logout_reason = $2 WHERE refresh_token_hash = $1 AND revoked_at IS NULL`,
+    [String(refreshTokenHash || ""), reason]
   );
   return result.rowCount;
 }
 
-async function revokeAuthSessionsByEmail(email, role = null) {
+async function revokeAuthSessionsByEmail(email, role = null, reason = "Session ended") {
   await ensureAuthSchema();
   if (!pool) return 0;
   const normalizedRole = normalizeRole(role);
   const result = await pool.query(
     `UPDATE auth_sessions
-     SET revoked_at = NOW()
+     SET revoked_at = NOW(), logout_reason = $3
      WHERE LOWER(email) = LOWER($1)
        AND ($2::text IS NULL OR role = $2)
        AND revoked_at IS NULL`,
-    [normalizeEmail(email), normalizedRole || null]
+    [normalizeEmail(email), normalizedRole || null, reason]
   );
   return result.rowCount;
 }
@@ -554,6 +547,9 @@ async function closeAuthStore() {
 }
 
 module.exports = {
+  recordAuthLoginAttempt: event => recordLoginAttempt(pool, event),
+  getPersistentSecurityMonitor: (query, at) => persistentMonitoring(pool, query, at),
+  getPersistentDevices: () => persistentDevices(pool),
   hasPostgresAuth,
   ensureAuthSchema,
   findAuthUserByEmail,

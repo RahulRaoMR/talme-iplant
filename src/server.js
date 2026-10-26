@@ -54,7 +54,10 @@ const {
   verifyPasswordResetOtp,
   resetAuthPasswordWithToken,
   upsertEmployeeRecordAudit,
-  getEmployeeRecordAudits
+  getEmployeeRecordAudits,
+  recordAuthLoginAttempt,
+  getPersistentSecurityMonitor,
+  getPersistentDevices
 } = require("./auth-store");
 const { requireEmailConfig, sendPasswordResetOtpEmail } = require("./email");
 const employeeStore = require("./employee-store");
@@ -264,10 +267,11 @@ function audit(req, userId, actionType, metadata = {}, entityType = null, entity
   );
 }
 
-function logLogin(req, user, success, action, reason = null, email = null) {
+async function logLogin(req, user, success, action, reason = null, email = null) {
   const userAgent = req.headers["user-agent"] || "";
   const ip = getIp(req);
   const location = recordIpLocation(db, ip);
+  const timestamp = now();
   db.prepare(`
     INSERT INTO login_history (user_id, email, success, action, reason, ip_address, device, browser, timestamp, location_json)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -280,9 +284,11 @@ function logLogin(req, user, success, action, reason = null, email = null) {
     ip,
     getDeviceName(userAgent),
     getBrowser(userAgent),
-    now(),
+    timestamp,
     JSON.stringify(location)
   );
+  if (!success) await recordAuthLoginAttempt({ email: user?.email || email, role: req.loginRole, reason, ip,
+    device: getDeviceName(userAgent), browser: getBrowser(userAgent), location, timestamp });
 }
 
 function upsertDevice(req, userId) {
@@ -539,10 +545,11 @@ async function createAuthResponse(req, res, user, rememberMe = false, action = "
     rememberMe,
     expiresAt: session.expiresAt,
     ipAddress: getIp(req),
-    userAgent: req.headers["user-agent"] || ""
+    userAgent: req.headers["user-agent"] || "",
+    location: recordIpLocation(db, getIp(req))
   });
   setRefreshCookie(res, session.refreshToken, rememberMe ? rememberMeTtlSeconds : refreshTokenTtlSeconds);
-  logLogin(req, user, true, action);
+  await logLogin(req, user, true, action);
   audit(req, user.id, action, { rememberMe });
   sendJson(res, 200, {
     success: true,
@@ -559,12 +566,13 @@ async function login(req, res) {
   const email = String(body.email || "").trim();
   const password = normalizeSubmittedPassword(body.password);
   const requestedRole = roleSlugFromAuthBody(body);
+  req.loginRole = requestedRole;
   if (!email || !password) {
-    logLogin(req, null, false, "Failed Login", "Email or password missing", email || null);
+    await logLogin(req, null, false, "Failed Login", "Email or password missing", email || null);
     return sendAuthFailure(res, 400, "Email and password are required.");
   }
   if (!requestedRole) {
-    logLogin(req, null, false, "Failed Login", "Login role missing", email);
+    await logLogin(req, null, false, "Failed Login", "Login role missing", email);
     return sendAuthFailure(res, 400, "Please select Admin or Talme HR.");
   }
 
@@ -572,12 +580,15 @@ async function login(req, res) {
     return sendAuthFailure(res, 500, "Authentication database is not configured.");
   }
   const ipLimit = await consumeSecurityLimit(`login-ip:${sha256(getIp(req))}`, 8, 60);
-  if (!ipLimit.allowed) return sendSecurityLimit(res, ipLimit.retryAfter, "Too many login attempts. Please try again shortly.");
+  if (!ipLimit.allowed) {
+    await logLogin(req, null, false, "Failed Login", "Too many login attempts from this IP", email);
+    return sendSecurityLimit(res, ipLimit.retryAfter, "Too many login attempts. Please try again shortly.");
+  }
   const failureKey = `login-fail:${sha256(JSON.stringify([email.toLowerCase(), requestedRole]))}`;
   const failureLimit = await consumeSecurityLimit(failureKey, 5, 15 * 60);
   const lockoutMessage = "Too many failed login attempts. Login is temporarily locked. Try again later or reset your password.";
   if (!failureLimit.allowed) {
-    logLogin(req, null, false, "Failed Login", "Temporary login lockout", email);
+    await logLogin(req, null, false, "Failed Login", "Temporary login lockout", email);
     return sendSecurityLimit(res, failureLimit.retryAfter, lockoutMessage);
   }
   const recordFailure = () => {
@@ -591,18 +602,18 @@ async function login(req, res) {
   const authUser = authUsers.find(candidate => candidate.role === requestedRole) || null;
   if (!authUser) {
     const anyRoleUser = authUsers[0] || null;
-    logLogin(req, null, false, "Failed Login", anyRoleUser ? "Requested login role not registered" : "Account not found", email);
+    await logLogin(req, null, false, "Failed Login", anyRoleUser ? "Requested login role not registered" : "Account not found", email);
     if (recordFailure()) return;
     return sendAuthFailure(res, anyRoleUser ? 403 : 404, anyRoleUser ? "This email is not registered for the selected login page." : "Account not found. Please register first.");
   }
   if (!await verifyAuthPassword(password, authUser.password_hash)) {
-    logLogin(req, null, false, "Failed Login", "Incorrect password", email);
+    await logLogin(req, null, false, "Failed Login", "Incorrect password", email);
     if (recordFailure()) return;
     return sendAuthFailure(res, 401, "Invalid password.");
   }
   await clearSecurityLimit(failureKey);
   if (!isApprovedAccount(authUser)) {
-    logLogin(req, null, false, "Failed Login", `Registration ${authUser.approval_status || "unapproved"}`, email);
+    await logLogin(req, null, false, "Failed Login", `Registration ${authUser.approval_status || "unapproved"}`, email);
     return sendAuthFailure(res, 403, registrationAccessMessage(authUser));
   }
   const user = mirrorAuthUserToLocal(authUser);
@@ -610,7 +621,7 @@ async function login(req, res) {
   const loginRole = primaryRoleForRequestedLogin(user, requestedRole);
   if (!loginRole) {
     const reason = body.role ? "Requested login role not assigned" : "Role not assigned";
-    logLogin(req, user, false, "Failed Login", reason, email);
+    await logLogin(req, user, false, "Failed Login", reason, email);
     return sendAuthFailure(res, 403, body.role ? "This account is not registered for the selected login page." : "No role is assigned to your account");
   }
   await createAuthResponse(req, res, user, Boolean(body.rememberMe), "Login", "Login successful.", loginRole, authUser);
@@ -633,8 +644,11 @@ async function register(req, res) {
   if (missing.length) {
     return sendAuthFailure(res, 400, `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} required.`);
   }
-  if (!validEmail(email)) {
+  if (email.length > 254 || !validEmail(email)) {
     return sendAuthFailure(res, 400, "Please enter a valid email address.");
+  }
+  if (!/^[0-9]{7,15}$/.test(phone)) {
+    return sendAuthFailure(res, 400, "Please enter a valid mobile number using 7 to 15 digits only.");
   }
   if (password !== confirmPassword) {
     return sendAuthFailure(res, 400, "Password and Confirm Password must match");
@@ -858,9 +872,9 @@ async function logout(req, res) {
     db.prepare("UPDATE sessions SET revoked_at = ? WHERE id = ?").run(now(), context.session.id);
   }
   const authSessionKey = context.session?.authSessionKey || context.payload?.authSid;
-  if (authSessionKey) await revokeAuthSessionByKey(authSessionKey).catch(() => {});
+  if (authSessionKey) await revokeAuthSessionByKey(authSessionKey, "Logout");
   clearRefreshCookie(res);
-  logLogin(req, context.user, true, "Logout");
+  await logLogin(req, context.user, true, "Logout");
   audit(req, context.user.id, "Logout");
   sendJson(res, 200, { message: "Logged out" });
 }
@@ -870,22 +884,24 @@ async function tabCloseLogout(req, res) {
   const token = String(body.accessToken || "");
   const payload = token ? verifyJwt(token) : null;
   const refreshToken = parseCookies(req).talme_refresh;
+  let persistentClosed = 0;
+  if (payload?.authSid) persistentClosed = await revokeAuthSessionByKey(payload.authSid, "Tab Closed Logout");
+  else if (refreshToken) persistentClosed = await revokeAuthSessionByRefreshHash(sha256(refreshToken), "Tab Closed Logout");
   let session = null;
   if (payload?.sub && payload?.sid) {
     session = db.prepare(`
       SELECT * FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL
     `).get(payload.sid, payload.sub);
-    if (payload.authSid) {
-      await revokeAuthSessionByKey(payload.authSid).catch(() => {});
-    }
   }
   if (!session && refreshToken) {
     session = db.prepare(`
       SELECT * FROM sessions WHERE refresh_token_hash = ? AND revoked_at IS NULL
     `).get(sha256(refreshToken));
-    await revokeAuthSessionByRefreshHash(sha256(refreshToken)).catch(() => {});
   }
-  if (!session) return sendJson(res, 200, { message: "No active session" });
+  if (!session) {
+    if (persistentClosed) clearRefreshCookie(res);
+    return sendJson(res, 200, { message: persistentClosed ? "Session closed" : "No active session" });
+  }
 
   const user = db.prepare("SELECT * FROM users WHERE id = ?").get(session.user_id);
   const closedAt = now();
@@ -894,7 +910,7 @@ async function tabCloseLogout(req, res) {
     db.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").run(closedAt, session.device_id);
   }
   if (user) {
-    logLogin(req, user, true, "Tab Closed Logout");
+    await logLogin(req, user, true, "Tab Closed Logout");
     audit(req, user.id, "Tab Closed Logout", { sessionId: session.id }, "session", session.id);
   }
   clearRefreshCookie(res);
@@ -905,10 +921,10 @@ async function logoutAll(req, res) {
   const context = await requireAuth(req, res, "auth.logout_all");
   if (!context) return;
   db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(now(), context.user.id);
-  if (context.user.email) await revokeAuthSessionsByEmail(context.user.email).catch(() => {});
+  if (context.user.email) await revokeAuthSessionsByEmail(context.user.email, null, "Logout from All Devices");
   clearRefreshCookie(res);
   audit(req, context.user.id, "Logout from All Devices");
-  logLogin(req, context.user, true, "Logout from All Devices");
+  await logLogin(req, context.user, true, "Logout from All Devices");
   sendJson(res, 200, { message: "Logged out from all devices" });
 }
 
@@ -973,6 +989,8 @@ async function adminRegisteredDevices(req, res) {
     return sendError(res, 403, "Forbidden");
   }
 
+  const persistent = await getPersistentDevices();
+  if (persistent !== null) return sendJson(res, 200, { items: persistent });
   const rows = db.prepare(`
     SELECT d.id, u.name, u.email, u.phone, group_concat(DISTINCT r.name) AS roles,
            d.device, d.browser, d.ip_address, d.user_agent, d.created_at, d.last_seen_at,
@@ -1043,7 +1061,13 @@ async function adminSecurityLive(req, res) {
   const observedAt = new Date();
   let monitoring;
   try {
-    monitoring = adminActivity(db, new URL(req.url, "http://localhost").searchParams.get("days") || 7, observedAt);
+    const query = Object.fromEntries(new URL(req.url, "http://localhost").searchParams);
+    const persistent = await getPersistentSecurityMonitor(query, observedAt);
+    if (persistent) {
+      const registered = await getRegisteredUserCounts();
+      return sendJson(res, 200, { ...persistent, stats: { ...persistent.stats, ...registered }, refreshedAt: now() });
+    }
+    monitoring = adminActivity(db, query.days || 7, observedAt);
   } catch (error) {
     if (error instanceof RangeError) return sendError(res, 400, error.message);
     throw error;

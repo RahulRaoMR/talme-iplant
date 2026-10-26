@@ -58,10 +58,28 @@ model AuthSession {
   revokedAt        DateTime? @map("revoked_at")
   ipAddress        String?   @map("ip_address")
   userAgent        String?   @map("user_agent")
+  locationJson     Json?     @map("location_json")
+  logoutReason     String?   @map("logout_reason")
   createdAt        DateTime  @default(now()) @map("created_at")
 
   @@index([email])
+  @@index([createdAt], map: "auth_sessions_created_at_idx")
   @@map("auth_sessions")
+}
+
+model AuthLoginAttempt {
+  id BigInt @id @default(autoincrement())
+  email String?
+  role String?
+  reason String?
+  ipAddress String? @map("ip_address")
+  device String?
+  browser String?
+  locationJson Json? @map("location_json")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt], map: "auth_login_attempts_created_at_idx")
+  @@map("auth_login_attempts")
 }
 
 model AuthSecurityLimit {

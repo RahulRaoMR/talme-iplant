@@ -92,6 +92,9 @@ async function main() {
     assert(!JSON.stringify(history).includes("Password-123"));
     const actionKey = `admin-review:${admin.user.authUserId}`;
     await auth.clearSecurityLimit(actionKey);
+    // Remote database latency must not expire the window during these sequential requests.
+    // The real expiry/reset behavior is exercised separately above.
+    await fixture.pool.query("INSERT INTO auth_security_limits(key,attempts,expires_at) VALUES($1,0,NOW()+INTERVAL '15 minutes')", [actionKey]);
     for (let i = 0; i < 20; i++) {
       const response = await call(`/api/admin/registered-users/${800000 + i}/approve`, { method: "POST", login: admin, body: { confirmed: true } });
       assert.equal(response.status, 404);

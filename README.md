@@ -69,9 +69,17 @@ Every protected API verifies JWT authentication and permissions.
 
 Admin monitoring uses calendar days in `Asia/Kolkata` (IST). Today's login/logout counters count recorded events, not all active sessions; an existing session can remain active without a new login today. Device totals count distinct devices with unexpired, unrevoked sessions and distinguish Android tablets from phones. A zero is retained when there are no matching events or devices.
 
+Deploy `20261026160000_persistent_login_monitoring` with `npm --prefix backend run prisma:deploy` before deploying the updated server. Login/session history, failed attempts, and device monitoring now use shared PostgreSQL records across workers and server restarts. Signing in on a second device keeps the first device signed in. Each session lists its member, role, browser, login location, login time and logout time in IST, with server pagination and search. Session expiry is labelled separately from a recorded logout; abrupt browser or network loss cannot provide an exact logout time.
+
+Run `npm run admin-sessions:test` for isolated PostgreSQL tests covering simultaneous devices, independent logout, cold starts, all-device logout, location search, and more than 100 history records. The test creates and removes its own schema.
+
+Failed login attempts, including IP throttling and account lockouts, are stored centrally with their original timestamps, IPs and approximate locations. To recover older local failures after the migration, preview with `npm run failed-logins:backfill -- --dry-run`, then run `npm run failed-logins:backfill`. The import preserves event dates and skips attempts already stored in PostgreSQL. Select an appropriate date range in Admin > Security to view older records; the dashboard's failure counter counts today only. Run `npm run failed-logins:test` to check recovery and repeat-import behavior in an isolated database schema.
+
 Login history stores approximate IP locations using the local `geoip-lite` dataset. The admin location map and activity tables include the selected date range; older history is backfilled from its recorded IPs. Localhost/private networks are labelled `Local network`, not assigned a guessed city. These are employee login locations, not employee profile addresses.
 
 For reverse-proxy deployments, set `TRUST_PROXY` to the proxy IPs/CIDRs (comma-separated), or `loopback` for a local reverse proxy. Leave it empty for direct connections. Forwarded addresses are accepted only from trusted hops. Do not use an unrestricted trust setting.
+
+On Vercel, the server uses its platform-provided client-IP header only when `VERCEL=1`, following the [Vercel request-header contract](https://vercel.com/docs/headers/request-headers). Other deployments still require the trusted proxy setting above. A previously recorded localhost IP cannot be converted back into the original client's address or city.
 
 Keep the GeoLite dataset current using the [geoip-lite update instructions](https://github.com/geoip-lite/node-geoip#update-the-datafiles-optional); newer MaxMind data requires your own license key. Restart the server after updating the dataset. No login IPs are sent to an external lookup service.
 

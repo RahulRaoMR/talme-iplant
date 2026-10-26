@@ -22,6 +22,12 @@ function trustedProxy(value, networks) {
 }
 
 function getClientIp(req, trust = process.env.TRUST_PROXY || "") {
+  // Vercel overwrites these headers at its edge; trust them only in that runtime.
+  // https://vercel.com/docs/headers/request-headers
+  if (process.env.VERCEL === "1") {
+    const platformIp = normalizeIp(req.headers?.["x-vercel-forwarded-for"] || req.headers?.["x-forwarded-for"]);
+    if (platformIp) return platformIp;
+  }
   const peer = normalizeIp(req.socket?.remoteAddress);
   if (!peer) return "unknown";
   const networks = String(trust).split(",").map(value => value.trim()).filter(Boolean)

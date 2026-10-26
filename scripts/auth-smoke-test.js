@@ -65,6 +65,19 @@ async function main() {
   const password = `Smoke-${Date.now()}-Aa1!`;
 
   try {
+    const validRegistration = { type: "talme_hr", name: "Contact Validation Test", email, phone, password, confirmPassword: password };
+    const usersBeforeValidation = (await fixture.pool.query("SELECT COUNT(*)::int AS total FROM auth_users")).rows[0].total;
+    for (const invalidEmail of ["9876543210", "person", "person@example", "person@@example.com", "person name@example.com", "a".repeat(245) + "@example.com"]) {
+      const result = await call("POST", "/api/auth/register", { ...validRegistration, email: invalidEmail });
+      assert(result.status === 400 && result.body.message === "Please enter a valid email address.", `Invalid email was not rejected: ${invalidEmail}`);
+    }
+    for (const invalidPhone of ["phone", "person@example.com", "98765abc10", "123456", "1234567890123456", "+919876543210", "98765 43210", "9.876543210"]) {
+      const result = await call("POST", "/api/auth/register", { ...validRegistration, phone: invalidPhone });
+      assert(result.status === 400 && result.body.message === "Please enter a valid mobile number using 7 to 15 digits only.", `Invalid mobile was not rejected: ${invalidPhone}`);
+    }
+    assert((await fixture.pool.query("SELECT COUNT(*)::int AS total FROM auth_users")).rows[0].total === usersBeforeValidation,
+      "Invalid contact details must never create registrations");
+    console.log("Passed: registration rejects phone numbers in Email and rejects letters, emails, punctuation, and invalid lengths in Mobile without saving accounts.");
     const registration = await call("POST", "/api/auth/register", {
       type: "talme_hr",
       name: "Auth Test User",

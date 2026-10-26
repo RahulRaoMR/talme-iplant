@@ -1,4 +1,4 @@
-const adminControl = { view: "dashboard", days: 7, search: "", payload: null, charts: [], request: 0, tables: {}, page: 1, userId: null, registrationFilter: "ALL", reviewing: false, recordsRequests: {}, reviewNotice: null };
+const adminControl = { view: "dashboard", days: 7, search: "", payload: null, charts: [], request: 0, tables: {}, page: 1, activityPage: 1, searchTimer: null, userId: null, registrationFilter: "ALL", reviewing: false, recordsRequests: {}, reviewNotice: null };
 
 function destroyAdminCharts() {
   adminControl.charts.forEach(chart => chart.destroy());
@@ -12,13 +12,12 @@ function adminButton(symbol, label, attributes = "") {
 function renderAdminControlCenter(root, title, role) {
   destroyAdminCharts();
   if (adminControl.userId !== state.user?.id) {
-    Object.assign(adminControl, { userId: state.user?.id, view: "dashboard", search: "", payload: null, tables: {}, page: 1, registrationFilter: "ALL", reviewing: false, recordsRequests: {}, reviewNotice: null });
+    Object.assign(adminControl, { userId: state.user?.id, view: "dashboard", search: "", payload: null, tables: {}, page: 1, activityPage: 1, registrationFilter: "ALL", reviewing: false, recordsRequests: {}, reviewNotice: null });
   }
   const navigation = [
     ["dashboard", "LayoutDashboard", "Dashboard"], ["users", "UsersRound", "Users", null, "admin.users.manage"],
     ["jobs", "BriefcaseBusiness", "Jobs", "/employer/dashboard", "company.dashboard"],
     ["applications", "ClipboardList", "Applications", "/candidate/dashboard", "applications.track"],
-    ["talent", "Users", "Talent Pool", "/hr/dashboard", "employees.manage"],
     ["attendance", "CalendarCheck", "Attendance", null, "unavailable"],
     ["devices", "Monitor", "Device Monitoring"], ["security", "ShieldCheck", "Security"],
     ["reports", "ChartNoAxesCombined", "Reports"], ["settings", "Settings", "Settings"]
@@ -99,10 +98,13 @@ function renderAdminControlCenter(root, title, role) {
     updateAdminTables(); setAdminView("activity");
   });
   root.querySelector("[data-admin-range]").addEventListener("change", event => {
-    adminControl.days = Number(event.target.value); loadSecurityMonitor();
+    adminControl.days = Number(event.target.value); adminControl.activityPage = 1; loadSecurityMonitor();
   });
   root.querySelector("[data-admin-search]").addEventListener("input", event => {
     adminControl.search = event.target.value; adminControl.page = 1; updateAdminTables(); renderAdminDetail();
+    adminControl.activityPage = 1;
+    clearTimeout(adminControl.searchTimer);
+    if (["activity", "sessions"].includes(adminControl.view)) adminControl.searchTimer = setTimeout(loadSecurityMonitor, 250);
   });
   setAdminView(adminControl.view);
   updateAdminLocations();
@@ -124,17 +126,36 @@ function adminUserCell(item) {
   return `<div class="admin-user-cell"><span class="admin-avatar small">${escapeHtml(profileInitials(name))}</span><span><strong>${escapeHtml(name)}</strong>${item.name && item.email ? `<small>${escapeHtml(item.email)}</small>` : ""}</span></div>`;
 }
 
+function adminDateTime(value) {
+  if (!value || Number.isNaN(new Date(value).getTime())) return "--";
+  return new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "medium" }).format(new Date(value));
+}
+
 function adminEventTable(items, limit = 100) {
-  return adminTable(["User", "Action", "Device", "Location", "IP Address", "Time"], items.filter(adminMatches).slice(0, limit).map(item => [
-    adminUserCell(item), `<span class="admin-event ${item.action?.includes("Logout") ? "logout" : "login"}">${item.action?.includes("Logout") ? "Logout" : "Login"}</span>`,
+  return adminTable(["User", "Action", "Device", "Location", "IP Address", "Date & time (IST)"], items.filter(adminMatches).slice(0, limit).map(item => [
+    adminUserCell(item), `<span class="admin-event ${item.event_type === "logout" || item.action?.includes("Logout") ? "logout" : "login"}">${escapeHtml(item.action || "Login")}</span>`,
     `<span class="admin-device-cell">${icon(/tablet|ipad/i.test(item.device) ? "Tablet" : /mobile|iphone|android|ios/i.test(item.device) ? "Smartphone" : "Monitor")}${escapeHtml(item.device || "Unknown")}</span>`,
-    escapeHtml(item.location || "Unknown"), escapeHtml(item.ip_address || "Unknown"), `<time title="${escapeHtml(formatDateTime(item.timestamp))}">${escapeHtml(new Date(item.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</time>`
+    escapeHtml(item.location || "Unknown"), escapeHtml(item.ip_address || "Unknown"), `<time datetime="${escapeHtml(item.timestamp)}">${escapeHtml(adminDateTime(item.timestamp))}</time>`
   ]));
 }
 
+function adminSessionHistory(payload) {
+  const pagination = payload.activityPagination || { page: 1, totalPages: 1, total: (payload.sessionDetails || []).length };
+  return `<div class="admin-record-pagination"><span>${formatNumber(pagination.total)} device sessions in selected range · Times in IST · Locations are approximate</span><span>Page ${pagination.page} of ${pagination.totalPages}</span><button type="button" class="admin-icon" aria-label="Previous activity page" data-admin-activity-page="-1" ${pagination.page <= 1 ? "disabled" : ""}>${icon("ChevronLeft")}</button><button type="button" class="admin-icon" aria-label="Next activity page" data-admin-activity-page="1" ${pagination.page >= pagination.totalPages ? "disabled" : ""}>${icon("ChevronRight")}</button></div>${adminTable(
+    ["User", "Role", "Device / browser", "Login location", "IP address", "Login time (IST)", "Logout time (IST)", "Status"],
+    (payload.sessionDetails || []).filter(adminMatches).map(item => [
+      adminUserCell(item), escapeHtml(formatRole(item.roles || "User")),
+      escapeHtml([item.device, item.browser].filter(Boolean).join(" / ") || "Unknown"),
+      escapeHtml(item.location || "Unknown"), escapeHtml(item.ip_address || "Unknown"),
+      escapeHtml(adminDateTime(item.created_at)),
+      item.revoked_at ? escapeHtml(adminDateTime(item.revoked_at)) : item.expired_at ? `Expired ${escapeHtml(adminDateTime(item.expired_at))}` : "Still signed in",
+      `<span title="${escapeHtml(item.logout_reason || item.session_status || "Unknown")}">${escapeHtml(item.session_status || "Unknown")}</span>`
+    ]), "No member sessions in this date range.")}`;
+}
+
 function adminFailuresTable(items, limit = 100) {
-  return adminTable(["User / Email", "IP Address", "Location", "Attempts", "Latest attempt"], items.filter(adminMatches).slice(0, limit).map(item => [
-    `<span class="admin-failure-user">${icon("ShieldAlert")}${escapeHtml(item.email || "Unknown")}</span>`, escapeHtml(item.ip_address || "Unknown"), escapeHtml(item.location || "Unknown"), `<strong class="admin-danger">${formatNumber(item.attempts)}</strong>`, escapeHtml(formatDateTime(item.timestamp))
+  return adminTable(["User / Email", "IP Address", "Location", "Attempts", "Latest attempt (IST)"], items.filter(adminMatches).slice(0, limit).map(item => [
+    `<span class="admin-failure-user">${icon("ShieldAlert")}${escapeHtml(item.email || "Unknown")}</span>`, escapeHtml(item.ip_address || "Unknown"), escapeHtml(item.location || "Unknown"), `<strong class="admin-danger">${formatNumber(item.attempts)}</strong>`, escapeHtml(adminDateTime(item.timestamp))
   ]), "No failed login attempts in this date range.");
 }
 
@@ -166,6 +187,7 @@ function updateAdminLocations() {
 function setAdminView(view) {
   adminControl.view = view;
   adminControl.page = 1;
+  adminControl.activityPage = 1;
   document.querySelector(".admin-control")?.classList.remove("navigation-open");
   document.querySelector("[data-admin-menu]")?.setAttribute("aria-expanded", "false");
   document.querySelectorAll(".admin-sidebar [data-admin-view]").forEach(button => {
@@ -180,6 +202,7 @@ function setAdminView(view) {
   document.querySelector(".admin-notifications").open = false;
   renderAdminDetail();
   if (["users", "devices"].includes(view)) loadAdminRecords(view);
+  if (["activity", "sessions", "security"].includes(view)) loadSecurityMonitor();
   if (view === "dashboard") adminControl.charts.forEach(chart => chart.resize());
 }
 
@@ -323,9 +346,9 @@ function renderAdminDetail() {
       content = `<div class="admin-record-pagination"><span>${formatNumber(matching.length)} records${view === "devices" ? " (latest 200)" : ""}</span><span>Page ${adminControl.page} of ${pages}</span><button type="button" class="admin-icon" title="Previous page" aria-label="Previous page" data-admin-page="-1" ${adminControl.page === 1 ? "disabled" : ""}>${icon("ChevronLeft")}</button><button type="button" class="admin-icon" title="Next page" aria-label="Next page" data-admin-page="1" ${adminControl.page === pages ? "disabled" : ""}>${icon("ChevronRight")}</button></div>${adminTable(columns, rows)}`;
     }
   } else if (view === "sessions") {
-    content = payload ? `<div class="admin-session-summary">${formatNumber(payload.stats.liveOnlineUsers || 0)} live online users</div>${adminTable(["User", "Device", "IP Address", "Status", "Login", "Logout", "Last Seen"], (payload.sessionDetails || []).filter(adminMatches).map(item => [adminUserCell(item), escapeHtml(item.device || "Unknown"), escapeHtml(item.ip_address || "Unknown"), escapeHtml(item.session_status || "Unknown"), escapeHtml(formatDateTime(item.created_at)), item.revoked_at ? escapeHtml(formatDateTime(item.revoked_at)) : "--", escapeHtml(formatDateTime(item.last_seen_at))]))}` : '<div class="admin-empty">Session data unavailable.</div>';
+    content = payload ? adminSessionHistory(payload) : '<div class="admin-empty">Session data unavailable.</div>';
   } else if (view === "locations") content = payload ? adminTable(["Location", "Logins", "Users"], (payload.locations || []).filter(adminMatches).map(item => [escapeHtml(item.location), formatNumber(item.logins), formatNumber(item.users)]), "No public-IP locations in the selected range.") : '<div class="admin-empty">Location data unavailable.</div>';
-  else if (view === "activity") content = payload ? `<div class="admin-session-summary">Latest ${formatNumber((payload.recentActivity || []).length)} events in selected range</div>${adminEventTable(payload.recentActivity || [])}` : '<div class="admin-empty">Activity unavailable.</div>';
+  else if (view === "activity") content = payload ? payload.activityPagination ? adminSessionHistory(payload) : `<div class="admin-session-summary">Latest ${formatNumber((payload.recentActivity || []).length)} events in selected range</div>${adminEventTable(payload.recentActivity || [])}` : '<div class="admin-empty">Activity unavailable.</div>';
   else if (view === "security") content = payload ? `<div class="admin-session-summary">Latest ${formatNumber((payload.failedAttempts || []).length)} user / IP groups in selected range</div>${adminFailuresTable(payload.failedAttempts || [])}` : '<div class="admin-empty">Security data unavailable.</div>';
   else if (view === "reports") content = `<div class="admin-detail-toolbar"><h2>Daily activity (IST)</h2>${adminButton("Download", "Export CSV", "data-admin-export")}</div>${payload ? adminTable(["Date (IST)", "Logins", "Logouts"], (payload.activity || []).filter(adminMatches).map(item => [escapeHtml(item.date), formatNumber(item.logins), formatNumber(item.logouts)])) : '<div class="admin-empty">Report unavailable.</div>'}`;
   else if (view === "settings") content = `<div class="admin-settings"><h2>Account</h2><dl><dt>Name</dt><dd>${escapeHtml(state.user?.name || "--")}</dd><dt>Email</dt><dd>${escapeHtml(state.user?.email || "--")}</dd><dt>Role</dt><dd>${escapeHtml(formatRole(state.user?.primaryRole || "super_admin"))}</dd></dl><label>Appearance<select data-admin-theme><option value="light" ${state.theme === "light" ? "selected" : ""}>Light</option><option value="dark" ${state.theme === "dark" ? "selected" : ""}>Dark</option></select></label>${adminButton("LogOut", "Logout", "data-admin-settings-logout")}</div>`;
@@ -337,6 +360,9 @@ function renderAdminDetail() {
   target.querySelectorAll("[data-registration-action]").forEach(button => button.addEventListener("click", () => reviewAdminRegistration(button)));
   target.querySelectorAll("[data-admin-detail-view]").forEach(button => button.addEventListener("click", () => setAdminView(button.dataset.adminDetailView)));
   target.querySelectorAll("[data-admin-page]").forEach(button => button.addEventListener("click", () => { adminControl.page += Number(button.dataset.adminPage); renderAdminDetail(); }));
+  target.querySelectorAll("[data-admin-activity-page]").forEach(button => button.addEventListener("click", () => {
+    adminControl.activityPage += Number(button.dataset.adminActivityPage); loadSecurityMonitor();
+  }));
   target.querySelector("[data-admin-settings-logout]")?.addEventListener("click", logout);
   target.querySelector("[data-admin-theme]")?.addEventListener("change", event => { state.theme = event.target.value; localStorage.setItem("talme_theme", state.theme); render(); });
   target.querySelector("[data-admin-export]")?.addEventListener("click", () => {
@@ -384,13 +410,16 @@ async function loadAdminControlMonitor() {
   const button = root.querySelector("[data-admin-refresh]");
   button.disabled = true;
   try {
-    const payload = await api(`/api/admin/security/live?days=${adminControl.days}`);
+    const params = new URLSearchParams({ days: String(adminControl.days), page: String(adminControl.activityPage), limit: "50" });
+    if (["activity", "sessions"].includes(adminControl.view) && adminControl.search.trim()) params.set("search", adminControl.search.trim());
+    const payload = await api(`/api/admin/security/live?${params}`);
     if (root !== document.querySelector(".admin-control") || request !== adminControl.request) return;
     adminControl.payload = payload;
+    if (payload.activityPagination) adminControl.activityPage = payload.activityPagination.page;
     root.querySelector("[data-admin-error]").hidden = true;
     root.querySelector("[data-admin-status-dot]").classList.remove("offline");
     root.querySelector("[data-admin-status]").textContent = "Real-time monitoring active";
-    root.querySelector("[data-security-refresh]").textContent = `Last updated: ${formatDateTime(payload.refreshedAt)}`;
+    root.querySelector("[data-security-refresh]").textContent = `Last updated: ${adminDateTime(payload.refreshedAt)} IST`;
     for (const [key, value] of Object.entries(payload.stats || {})) {
       const node = root.querySelector(`[data-security-stat="${key}"]`);
       if (node) node.textContent = formatNumber(value);

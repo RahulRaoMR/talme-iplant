@@ -575,12 +575,12 @@ function registerForm(message) {
         <input name="name" autocomplete="name" required>
       </div>
       <div class="field">
-        <label>Email</label>
-        <input name="email" type="email" autocomplete="email" required>
+        <label for="register-email">Email</label>
+        <input id="register-email" name="email" type="email" inputmode="email" autocomplete="email" maxlength="254" pattern="[^\\s@]+@[^\\s@]+\\.[^\\s@]+" title="Enter a valid email address, such as name@example.com." required>
       </div>
       <div class="field">
-        <label>Mobile</label>
-        <input name="phone" inputmode="tel" autocomplete="tel" required>
+        <label for="register-phone">Mobile</label>
+        <input id="register-phone" name="phone" type="tel" inputmode="numeric" autocomplete="tel" minlength="7" pattern="[0-9]{7,15}" title="Enter a mobile number using 7 to 15 digits only." required>
       </div>
       <div class="field">
         <label>Password</label>
@@ -670,6 +670,16 @@ function bindAuth() {
   document.querySelector("[data-switch-login]")?.addEventListener("click", () => openAuth("login"));
   document.querySelector("[data-login-form]")?.addEventListener("submit", submitLogin);
   document.querySelector("[data-register-form]")?.addEventListener("submit", submitRegister);
+  const registrationPhone = document.querySelector("[data-register-form] [name=phone]");
+  registrationPhone?.addEventListener("input", () => {
+    const caret = registrationPhone.selectionStart;
+    const position = registrationPhone.value.slice(0, caret).replace(/\D/g, "").length;
+    const digits = registrationPhone.value.replace(/\D/g, "");
+    if (registrationPhone.value !== digits) {
+      registrationPhone.value = digits;
+      if (caret !== null) registrationPhone.setSelectionRange(position, position);
+    }
+  });
   document.querySelector("[data-forgot-request-form]")?.addEventListener("submit", submitForgotRequest);
   document.querySelector("[data-forgot-otp-form]")?.addEventListener("submit", submitForgotOtp);
   document.querySelector("[data-forgot-reset-form]")?.addEventListener("submit", submitForgotReset);
@@ -747,10 +757,18 @@ async function submitRegister(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const body = formData(form);
+  body.email = String(body.email || "").trim().toLowerCase();
+  body.phone = String(body.phone || "").trim();
   body.password = normalizePasswordInput(body.password);
   body.confirmPassword = normalizePasswordInput(body.confirmPassword);
   if (!body.name || !body.email || !body.phone || !body.password || !body.confirmPassword) {
     return setNotice("Name, email, phone, password, and confirm password are required.");
+  }
+  if (body.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
+    return setNotice("Please enter a valid email address.");
+  }
+  if (!/^[0-9]{7,15}$/.test(body.phone)) {
+    return setNotice("Please enter a valid mobile number using 7 to 15 digits only.");
   }
   if (body.password !== body.confirmPassword) {
     return setNotice("Password and Confirm Password must match");

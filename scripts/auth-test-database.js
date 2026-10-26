@@ -27,6 +27,7 @@ async function createAuthTestDatabase() {
       ('Inactive Fixture','inactive@example.test','9000000001',$2,'hr_manager',false)`, [admin.email, await bcrypt.hash(admin.password, 12)]);
     await pool.query(migration("20261007120000_registration_approval"));
     await pool.query(migration("20261007130000_auth_security_limits"));
+    await pool.query(migration("20261026160000_persistent_login_monitoring"));
     return { pool, admin, async close() {
       await pool.end();
       await control.query(`DROP SCHEMA "${schema}" CASCADE`);
